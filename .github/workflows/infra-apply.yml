@@ -62,7 +62,7 @@ jobs:
           terraform_wrapper: true
 
       - name: Setup Terramate
-        uses: terramate-io/terramate-action@v1
+        uses: terramate-io/terramate-action@v3
         with:
           version: "latest"
 
