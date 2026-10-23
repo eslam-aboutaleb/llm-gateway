@@ -197,7 +197,7 @@ jobs:
       OCI_RELEASE_BUCKET: ${{ vars.OCI_RELEASE_BUCKET }}
     steps:
       - name: Download Release Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-${{ needs.build-release.outputs.release_tag }}
           path: release-artifacts
