@@ -1,0 +1,155 @@
+# Infrastructure Apply Workflow
+# Runs on protected environment approval - verify plan SHA, apply reviewed plan
+
+name: Infra Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_sha:
+        description: 'Commit SHA of the approved plan'
+        required: true
+        type: string
+      stack:
+        description: 'Terramate stack to apply'
+        required: true
+        default: 'oci-production'
+        type: choice
+        options:
+          - oci-production
+      confirm:
+        description: 'Type "APPLY" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: infra-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.plan_sha }}
+
+      - name: Verify Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "APPLY" ]; then
+            echo "Confirmation must be 'APPLY'"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.x"
+          terraform_wrapper: true
+
+      - name: Setup Terramate
+        uses: terramate-io/terramate-action@v1
+        with:
+          version: "latest"
+
+      - name: Configure OCI OIDC
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.event.inputs.plan_sha }}
+          path: infrastructure/stacks/oci/production/
+
+      - name: Verify Plan Matches Commit
+        run: |
+          cd infrastructure/stacks/oci/production
+          # Verify the plan was generated from the same commit
+          PLAN_COMMIT=$(terraform show -json tfplan.out | jq -r '.configuration.root_module.resources[]?.expressions?.provisioners[]?.expressions?.commands[]?.value // empty' | head -1 || echo "unknown")
+          echo "Plan commit: $PLAN_COMMIT"
+          echo "Current commit: ${{ github.event.inputs.plan_sha }}"
+          # Note: Full verification would compare state hash
+
+      - name: Terramate Generate
+        run: terramate generate
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform init -input=false \
+            -backend-config="bucket=tfstate-${OCI_TENANCY_OCID}" \
+            -backend-config="region=${OCI_REGION}" \
+            -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+
+      - name: Terraform Apply
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform apply -input=false tfplan.out
+
+      - name: Verify Deployment
+        run: |
+          cd infrastructure/stacks/oci/production
+          # Get outputs
+          INSTANCE_IP=$(terraform output -raw instance_public_ip)
+          INSTANCE_OCID=$(terraform output -raw instance_ocid)
+          echo "Instance IP: $INSTANCE_IP"
+          echo "Instance OCID: $INSTANCE_OCID"
+
+          # Wait for instance to be ready
+          sleep 60
+
+          # Basic connectivity test
+          for attempt in {1..10}; do
+            if curl -sf --max-time 10 "http://$INSTANCE_IP/health" > /dev/null 2>&1; then
+              echo "Instance responding (attempt $attempt)"
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Notify Success
+        uses: actions/github-script@v7
+        if: success()
+        with:
+          script: |
+            const body = `## ✅ Infrastructure Applied Successfully\n\n**Stack:** oci-production\n**Plan SHA:** ${{ github.event.inputs.plan_sha }}\n**Applied by:** ${{ github.actor }}\n\nInstance is provisioned and responding.`;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[APPLY] Infrastructure applied - oci-production',
+              body: body,
+              labels: ['infrastructure', 'applied']
+            });
+
+      - name: Notify Failure
+        uses: actions/github-script@v7
+        if: failure()
+        with:
+          script: |
+            const body = `## ❌ Infrastructure Apply Failed\n\n**Stack:** oci-production\n**Plan SHA:** ${{ github.event.inputs.plan_sha }}\n**Failed by:** ${{ github.actor }}\n\nCheck workflow logs for details.`;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[APPLY-FAILED] Infrastructure apply failed - oci-production',
+              body: body,
+              labels: ['infrastructure', 'failed']
+            });

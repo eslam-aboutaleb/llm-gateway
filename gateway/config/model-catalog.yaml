@@ -1,0 +1,204 @@
+# Model Catalog for llm-gateway
+# This file defines the approved model aliases and their provider mappings
+# Source of truth: Git (this file)
+# Admin UI changes MUST be reconciled back to this file
+
+# ===========================================
+# Model Aliases (Capability Contracts)
+# ===========================================
+# Each alias represents a capability, not a specific provider model.
+# Provider mappings are tested before publication.
+# Actual model compatibility must be verified per release.
+
+model_aliases:
+  # ---------------------------------------
+  # General Purpose Chat
+  # ---------------------------------------
+  - alias: "general-fast"
+    description: "Fast, cost-effective model for general chat and analysis"
+    capabilities: ["chat", "streaming", "function_calling"]
+    approved_providers: ["openai"]
+    default_model: "openai/gpt-4o-mini"
+    fallback_models: []
+    max_tokens: 128000
+    context_window: 128000
+    cost_tier: "low"
+    enabled: true
+
+  - alias: "general-reasoning"
+    description: "Higher capability model for complex reasoning tasks"
+    capabilities: ["chat", "streaming", "function_calling", "reasoning"]
+    approved_providers: ["openai"]
+    default_model: "openai/gpt-4o"
+    fallback_models: ["openai/gpt-4o-mini"]
+    max_tokens: 128000
+    context_window: 128000
+    cost_tier: "medium"
+    enabled: true
+
+  # ---------------------------------------
+  # Specialized Capabilities
+  # ---------------------------------------
+  - alias: "structured-output"
+    description: "Optimized for structured output and JSON schema compliance"
+    capabilities: ["chat", "streaming", "structured_output", "json_mode"]
+    approved_providers: ["openai"]
+    default_model: "openai/gpt-4o"
+    fallback_models: []
+    max_tokens: 128000
+    context_window: 128000
+    cost_tier: "medium"
+    enabled: true
+
+  - alias: "agent-tools"
+    description: "Optimized for agent workflows and multi-step tool use"
+    capabilities: ["chat", "streaming", "function_calling", "parallel_tools"]
+    approved_providers: ["openai"]
+    default_model: "openai/gpt-4o"
+    fallback_models: []
+    max_tokens: 128000
+    context_window: 128000
+    cost_tier: "medium"
+    enabled: true
+
+  # ---------------------------------------
+  # Embeddings
+  # ---------------------------------------
+  - alias: "rag-embedding"
+    description: "Embeddings for RAG, similarity search, and clustering"
+    capabilities: ["embeddings"]
+    approved_providers: ["openai"]
+    default_model: "openai/text-embedding-3-small"
+    fallback_models: []
+    dimensions: 1536
+    max_tokens: 8191
+    cost_tier: "very_low"
+    enabled: true
+
+  - alias: "rag-embedding-large"
+    description: "Higher dimensional embeddings for improved retrieval"
+    capabilities: ["embeddings"]
+    approved_providers: ["openai"]
+    default_model: "openai/text-embedding-3-large"
+    fallback_models: ["openai/text-embedding-3-small"]
+    dimensions: 3072
+    max_tokens: 8191
+    cost_tier: "low"
+    enabled: false  # Enable after testing
+
+# ===========================================
+# Provider Profiles
+# ===========================================
+# This registry is provider-neutral metadata. LiteLLM's runtime deployment
+# entries live in litellm.yaml and use these profile IDs as their vocabulary.
+# Credentials are injected via environment variables at runtime.
+# NEVER store credentials in this file.
+
+provider_profiles:
+  openai:
+    name: "OpenAI"
+    litellm_provider: "openai"
+    model_prefix: "openai/"
+    auth:
+      type: "api_key"
+      env_var: "OPENAI_API_KEY"
+    base_url_env: "OPENAI_API_BASE"
+    enabled: true
+
+  vertex:
+    name: "Google Vertex AI"
+    litellm_provider: "vertex_ai"
+    model_prefix: "vertex_ai/"
+    auth:
+      type: "gcp_iam"
+      env_var: "GOOGLE_APPLICATION_CREDENTIALS"
+    required_env_vars: ["VERTEX_PROJECT", "VERTEX_LOCATION"]
+    enabled: false
+
+  bedrock:
+    name: "Amazon Bedrock"
+    litellm_provider: "bedrock"
+    model_prefix: "bedrock/"
+    auth:
+      type: "aws_iam"
+      env_var: "AWS_ACCESS_KEY_ID"
+    required_env_vars: ["AWS_REGION_NAME"]
+    enabled: false
+
+  azure:
+    name: "Azure OpenAI"
+    litellm_provider: "azure"
+    model_prefix: "azure/"
+    auth:
+      type: "api_key"
+      env_var: "AZURE_API_KEY"
+    required_env_vars: ["AZURE_API_BASE", "AZURE_API_VERSION"]
+    enabled: false
+
+  anthropic:
+    name: "Anthropic"
+    litellm_provider: "anthropic"
+    model_prefix: "anthropic/"
+    auth:
+      type: "api_key"
+      env_var: "ANTHROPIC_API_KEY"
+    enabled: false
+
+# ===========================================
+# Cost Tracking (Estimates Only)
+# ===========================================
+# Actual costs may differ from provider billing.
+# Use provider dashboards for authoritative costs.
+
+cost_estimates:
+  openai:
+    gpt-4o:
+      input_per_1k: 0.0025
+      output_per_1k: 0.01
+    gpt-4o-mini:
+      input_per_1k: 0.00015
+      output_per_1k: 0.0006
+    gpt-4-turbo:
+      input_per_1k: 0.01
+      output_per_1k: 0.03
+    gpt-3.5-turbo:
+      input_per_1k: 0.0005
+      output_per_1k: 0.0015
+    text-embedding-3-small:
+      input_per_1k: 0.00002
+    text-embedding-3-large:
+      input_per_1k: 0.00013
+    text-embedding-ada-002:
+      input_per_1k: 0.0001
+
+# ===========================================
+# Validation Rules
+# ===========================================
+# These rules are enforced by the validation script
+
+validation:
+  # Required fields for each alias
+  required_alias_fields: ["alias", "description", "capabilities", "approved_providers", "default_model", "max_tokens", "context_window", "cost_tier", "enabled"]
+
+  # Required fields for each provider profile
+  required_provider_profile_fields: ["name", "litellm_provider", "model_prefix", "auth", "enabled"]
+
+  # Allowed capabilities
+  allowed_capabilities: ["chat", "streaming", "function_calling", "structured_output", "json_mode", "reasoning", "parallel_tools", "embeddings"]
+
+  # Allowed cost tiers
+  allowed_cost_tiers: ["very_low", "low", "medium", "high", "very_high"]
+
+# ===========================================
+# Version and Metadata
+# ===========================================
+version: "1.0.0"
+last_updated: "2026-10-23"
+updated_by: "eslam-aboutaleb"
+changelog:
+  - version: "1.0.0"
+    date: "2026-10-23"
+    changes:
+      - "Initial model catalog with 5 aliases"
+      - "OpenAI provider configured"
+      - "Cost estimates added"

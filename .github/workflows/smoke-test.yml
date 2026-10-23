@@ -1,0 +1,369 @@
+# Smoke Test & Network Verification Workflow
+# Replaces: smoke-test.sh, verify-network.sh
+# Runs on deploy, schedule, and manual dispatch
+
+name: Smoke Test & Network Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of test to run'
+        required: true
+        type: choice
+        options:
+          - full
+          - smoke
+          - network
+      gateway_url:
+        description: 'Gateway URL to test (optional, uses vars.GATEWAY_DNS_DOMAIN)'
+        required: false
+        type: string
+      test_key:
+        description: 'Test API key (optional, uses secrets.SMOKE_TEST_KEY)'
+        required: false
+        type: string
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+
+permissions:
+  contents: read
+
+env:
+  GATEWAY_URL: ${{ vars.GATEWAY_DNS_DOMAIN }}
+  TEST_KEY: ${{ secrets.SMOKE_TEST_KEY }}
+
+jobs:
+  smoke-test:
+    name: Smoke Tests
+    if: github.event.inputs.test_type == 'full' || github.event.inputs.test_type == 'smoke' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine gateway URL
+        id: url
+        run: |
+          URL="${{ github.event.inputs.gateway_url || vars.GATEWAY_DNS_DOMAIN }}"
+          if [[ ! "$URL" =~ ^https?:// ]]; then
+            URL="https://$URL"
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Determine test key
+        id: key
+        run: |
+          KEY="${{ github.event.inputs.test_key || secrets.SMOKE_TEST_KEY }}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Run smoke tests
+        run: |
+          GATEWAY_URL="${{ steps.url.outputs.url }}"
+          TEST_KEY="${{ steps.key.outputs.key }}"
+
+          echo "Running smoke tests against $GATEWAY_URL"
+
+          # Test 1: Health check (public)
+          echo "Test 1: Health check"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL/health" 2>/dev/null || echo "000")
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "  ✓ Health check passed"
+          else
+            echo "  ✗ Health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          # Test 2: Status check
+          echo "Test 2: Status check"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL/status" 2>/dev/null || echo "000")
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "  ✓ Status check passed"
+          else
+            echo "  ✗ Status check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          if [ -n "$TEST_KEY" ]; then
+            # Test 3: Models list (requires auth)
+            echo "Test 3: Models list"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Authorization: Bearer $TEST_KEY" "$GATEWAY_URL/v1/models" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" == "200" ]; then
+              echo "  ✓ Models list passed"
+            else
+              echo "  ✗ Models list failed (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+
+            # Test 4: Chat completions (expect 5xx without provider but not 401/403)
+            echo "Test 4: Chat completions endpoint"
+            RESPONSE=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/v1/chat/completions" \
+              -H "Authorization: Bearer $TEST_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"model": "general-fast", "messages": [{"role": "user", "content": "test"}], "max_tokens": 5}' 2>/dev/null || true)
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "500" || "$HTTP_CODE" == "502" || "$HTTP_CODE" == "503" ]]; then
+              echo "  ✓ Chat endpoint reachable (HTTP $HTTP_CODE)"
+            else
+              echo "  ✗ Chat endpoint unexpected response (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+
+            # Test 5: Embeddings endpoint
+            echo "Test 5: Embeddings endpoint"
+            RESPONSE=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/v1/embeddings" \
+              -H "Authorization: Bearer $TEST_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"model": "rag-embedding", "input": ["test"]}' 2>/dev/null || true)
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "500" || "$HTTP_CODE" == "502" || "$HTTP_CODE" == "503" ]]; then
+              echo "  ✓ Embeddings endpoint reachable (HTTP $HTTP_CODE)"
+            else
+              echo "  ✗ Embeddings endpoint unexpected response (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+
+            # Test 6: Management routes blocked
+            echo "Test 6: Management routes blocked"
+            for endpoint in "/ui" "/key/generate" "/team/list" "/config" "/spend/logs" "/metrics" "/health/readiness" "/docs" "/openapi.json"; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL$endpoint" 2>/dev/null || echo "000")
+              if [ "$HTTP_CODE" == "404" ]; then
+                echo "  ✓ $endpoint blocked (404)"
+              else
+                echo "  ✗ $endpoint accessible (HTTP $HTTP_CODE)"
+                exit 1
+              fi
+            done
+
+            # Test 7: Unknown routes blocked
+            echo "Test 7: Unknown routes blocked"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL/unknown/path" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" == "404" ]; then
+              echo "  ✓ Unknown route blocked (404)"
+            else
+              echo "  ✗ Unknown route accessible (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+          else
+            echo "⚠ Skipping authenticated tests (no TEST_KEY)"
+            echo "Test 3-7: SKIPPED"
+          fi
+
+          echo ""
+          echo "All smoke tests passed!"
+
+  network-verification:
+    name: Network Verification
+    if: github.event.inputs.test_type == 'full' || github.event.inputs.test_type == 'network'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine gateway URL
+        id: url
+        run: |
+          URL="${{ github.event.inputs.gateway_url || vars.GATEWAY_DNS_DOMAIN }}"
+          if [[ ! "$URL" =~ ^https?:// ]]; then
+            URL="https://$URL"
+          fi
+          # Extract hostname
+          HOST=$(echo "$URL" | sed -E 's|^https?://||' | sed -E 's|/.*||')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Verify network configuration
+        run: |
+          HOST="${{ steps.url.outputs.host }}"
+
+          echo "=== Network Verification for $HOST ==="
+          echo ""
+
+          FAILED=0
+          WARNINGS=0
+
+          # Check required open ports
+          check_port() {
+            local port="$1"
+            local protocol="${2:-tcp}"
+            local description="$3"
+            local should_be_open="${4:-true}"
+
+            if timeout 5 bash -c "</dev/$protocol/$HOST/$port" 2>/dev/null; then
+              if [[ "$should_be_open" == "true" ]]; then
+                echo "  ✓ Port $port/$protocol OPEN - $description"
+              else
+                echo "  ✗ Port $port/$protocol OPEN (should be closed) - $description"
+                ((FAILED++))
+              fi
+            else
+              if [[ "$should_be_open" == "false" ]]; then
+                echo "  ✓ Port $port/$protocol CLOSED - $description"
+              else
+                echo "  ✗ Port $port/$protocol CLOSED (should be open) - $description"
+                ((FAILED++))
+              fi
+            fi
+          }
+
+          echo "Checking public ingress ports..."
+          check_port 80 tcp "HTTP (ACME/redirect)" true
+          check_port 443 tcp "HTTPS (API)" true
+
+          echo ""
+          echo "Checking ports that must be closed to public..."
+          check_port 22 tcp "SSH" false
+          check_port 4000 tcp "LiteLLM direct" false
+          check_port 5432 tcp "PostgreSQL" false
+          check_port 6379 tcp "Redis" false
+          check_port 9090 tcp "Prometheus" false
+          check_port 9100 tcp "Node Exporter" false
+          check_port 2019 tcp "Caddy admin" false
+
+          # Check TLS certificate
+          echo ""
+          echo "Checking TLS certificate..."
+          if command -v openssl &> /dev/null; then
+            CERT_INFO=$(timeout 10 openssl s_client -connect "$HOST:443" -servername "$HOST" < /dev/null 2>/dev/null | openssl x509 -noout -text 2>/dev/null || true)
+
+            if [[ -n "$CERT_INFO" ]]; then
+              echo "  ✓ TLS certificate retrieved"
+
+              EXPIRY=$(echo "$CERT_INFO" | grep "Not After" | cut -d: -f2- | xargs)
+              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$EXPIRY" +%s 2>/dev/null)
+              NOW_EPOCH=$(date +%s)
+              DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+
+              if [ "$DAYS_LEFT" -gt 30 ]; then
+                echo "  ✓ Certificate valid for $DAYS_LEFT days"
+              elif [ "$DAYS_LEFT" -gt 7 ]; then
+                echo "  ⚠ Certificate expires in $DAYS_LEFT days"
+                ((WARNINGS++))
+              else
+                echo "  ✗ Certificate expires in $DAYS_LEFT days"
+                ((FAILED++))
+              fi
+
+              if echo "$CERT_INFO" | grep -q "DNS:$HOST"; then
+                echo "  ✓ Certificate includes $HOST"
+              else
+                echo "  ✗ Certificate missing $HOST in SAN"
+                ((FAILED++))
+              fi
+
+              TLS_VERSION=$(timeout 10 openssl s_client -connect "$HOST:443" -servername "$HOST" < /dev/null 2>&1 | grep "Protocol" | head -1 | awk '{print $3}')
+              if [[ "$TLS_VERSION" == "TLSv1.2" || "$TLS_VERSION" == "TLSv1.3" ]]; then
+                echo "  ✓ TLS version: $TLS_VERSION"
+              else
+                echo "  ⚠ TLS version: $TLS_VERSION"
+                ((WARNINGS++))
+              fi
+            else
+              echo "  ✗ Failed to retrieve TLS certificate"
+              ((FAILED++))
+            fi
+          else
+            echo "  ⚠ openssl not available, skipping TLS check"
+            ((WARNINGS++))
+          fi
+
+          # Check HTTP -> HTTPS redirect
+          echo ""
+          echo "Checking HTTP to HTTPS redirect..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$HOST" 2>/dev/null || echo "000")
+          if [[ "$RESPONSE" == "301" || "$RESPONSE" == "302" || "$RESPONSE" == "308" ]]; then
+            LOCATION=$(curl -s -o /dev/null -w "%{redirect_url}" --max-time 10 "http://$HOST" 2>/dev/null || echo "")
+            if [[ "$LOCATION" == https://* ]]; then
+              echo "  ✓ HTTP redirects to HTTPS ($RESPONSE)"
+            else
+              echo "  ⚠ HTTP redirects but not to HTTPS ($RESPONSE -> $LOCATION)"
+              ((WARNINGS++))
+            fi
+          else
+            echo "  ✗ HTTP does not redirect to HTTPS ($RESPONSE)"
+            ((FAILED++))
+          fi
+
+          # Check security headers
+          echo ""
+          echo "Checking security headers..."
+          HEADERS=$(curl -s -I --max-time 10 "https://$HOST" 2>/dev/null || true)
+
+          check_header() {
+            local header="$1"
+            local expected="$2"
+            local description="$3"
+
+            if echo "$HEADERS" | grep -qi "^$header:"; then
+              VALUE=$(echo "$HEADERS" | grep -i "^$header:" | cut -d: -f2- | xargs)
+              if [[ -n "$expected" && "$VALUE" != "$expected" ]]; then
+                echo "  ⚠ $header: $VALUE (expected $expected) - $description"
+                ((WARNINGS++))
+              else
+                echo "  ✓ $header: $VALUE - $description"
+              fi
+            else
+              echo "  ✗ $header missing - $description"
+              ((FAILED++))
+            fi
+          }
+
+          check_header "Strict-Transport-Security" "" "HSTS"
+          check_header "X-Content-Type-Options" "nosniff" "MIME sniffing protection"
+          check_header "X-Frame-Options" "DENY" "Clickjacking protection"
+          check_header "Referrer-Policy" "" "Referrer policy"
+          check_header "Permissions-Policy" "" "Permissions policy"
+
+          if echo "$HEADERS" | grep -qi "^Server:"; then
+            SERVER=$(echo "$HEADERS" | grep -i "^Server:" | cut -d: -f2- | xargs)
+            echo "  ⚠ Server header exposed: $SERVER"
+            ((WARNINGS++))
+          else
+            echo "  ✓ Server header hidden"
+          fi
+
+          # Check API endpoints
+          echo ""
+          echo "Checking API endpoint accessibility..."
+          for endpoint in "/v1/models" "/v1/chat/completions" "/v1/embeddings"; do
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$HOST$endpoint" 2>/dev/null || echo "000")
+            if [[ "$RESPONSE" == "401" || "$RESPONSE" == "403" ]]; then
+              echo "  ✓ $endpoint requires authentication (HTTP $RESPONSE)"
+            elif [[ "$RESPONSE" == "200" ]]; then
+              echo "  ⚠ $endpoint accessible without auth (HTTP $RESPONSE)"
+              ((WARNINGS++))
+            elif [[ "$RESPONSE" == "404" ]]; then
+              echo "  ✗ $endpoint returns 404 (should be 401/403)"
+              ((FAILED++))
+            else
+              echo "  ⚠ $endpoint unexpected response (HTTP $RESPONSE)"
+              ((WARNINGS++))
+            fi
+          done
+
+          # Check management endpoints are blocked
+          echo ""
+          echo "Checking management endpoints are blocked..."
+          for endpoint in "/ui" "/key/generate" "/team/list" "/config" "/spend/logs" "/metrics" "/health/readiness"; do
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$HOST$endpoint" 2>/dev/null || echo "000")
+            if [[ "$RESPONSE" == "404" ]]; then
+              echo "  ✓ $endpoint blocked (404)"
+            else
+              echo "  ✗ $endpoint accessible (HTTP $RESPONSE)"
+              ((FAILED++))
+            fi
+          done
+
+          # Summary
+          echo ""
+          echo "=== Network Verification Summary ==="
+          echo "Failed: $FAILED"
+          echo "Warnings: $WARNINGS"
+
+          if [[ $FAILED -gt 0 ]]; then
+            echo "✗ Verification FAILED"
+            exit 1
+          else
+            echo "✓ Verification PASSED"
+          fi

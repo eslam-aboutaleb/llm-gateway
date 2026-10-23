@@ -1,0 +1,206 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://llm-gateway.example.com/schemas/provider-config.json",
+  "title": "LLM Gateway Provider Configuration",
+  "description": "Provider abstraction layer compatible with LiteLLM's provider ecosystem",
+  "type": "object",
+  "required": ["version", "providers"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version"
+    },
+    "providers": {
+      "type": "object",
+      "description": "Map of provider ID to provider configuration",
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "required": ["id", "name", "litellm_provider", "api_base", "auth", "models"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "description": "Unique provider identifier (e.g., openai, anthropic, azure)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable provider name"
+        },
+        "litellm_provider": {
+          "type": "string",
+          "description": "LiteLLM provider prefix (e.g., openai, anthropic, azure, vertex_ai, bedrock)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Provider description"
+        },
+        "api_base": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base API URL"
+        },
+        "api_version": {
+          "type": "string",
+          "description": "API version (for Azure, etc.)"
+        },
+        "auth": {
+          "type": "object",
+          "required": ["type", "env_var"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["bearer", "api_key", "header", "oauth2", "aws_iam", "gcp_iam", "azure_ad"],
+              "description": "Authentication type"
+            },
+            "env_var": {
+              "type": "string",
+              "description": "Environment variable name for the credential"
+            },
+            "header_name": {
+              "type": "string",
+              "description": "Custom header name (for header auth type)"
+            },
+            "additional_env_vars": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Additional environment variables needed"
+            }
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/model"},
+          "minItems": 1,
+          "description": "Models supported by this provider"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["chat", "completions", "embeddings", "images", "audio", "vision", "function_calling", "streaming", "structured_output", "reasoning", "realtime", "fine_tuning", "batch", "rerank"]
+          },
+          "description": "Provider-level capabilities"
+        },
+        "rate_limits": {
+          "type": "object",
+          "properties": {
+            "requests_per_minute": {"type": "integer", "minimum": 1},
+            "tokens_per_minute": {"type": "integer", "minimum": 1},
+            "requests_per_day": {"type": "integer", "minimum": 1}
+          },
+          "description": "Default rate limits (can be overridden per model)"
+        },
+        "transform": {
+          "type": "object",
+          "properties": {
+            "request": {"type": "string", "description": "Custom request transform function name"},
+            "response": {"type": "string", "description": "Custom response transform function name"}
+          },
+          "description": "Custom transformation functions (for non-standard APIs)"
+        },
+        "extra_headers": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "Additional headers to include in requests"
+        },
+        "supported_parameters": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "List of supported OpenAI-compatible parameters"
+        },
+        "unsupported_parameters": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "List of explicitly unsupported parameters"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this provider is enabled"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "name", "litellm_model", "capabilities"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Internal model identifier (e.g., gpt-4o-mini)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable model name"
+        },
+        "litellm_model": {
+          "type": "string",
+          "description": "Full LiteLLM model identifier (e.g., openai/gpt-4o-mini, anthropic/claude-3-5-sonnet-20241022)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Model description"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["chat", "completions", "embeddings", "images", "audio", "vision", "function_calling", "streaming", "structured_output", "reasoning", "realtime"]
+          },
+          "description": "Model capabilities"
+        },
+        "context_window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum context window in tokens"
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum output tokens"
+        },
+        "pricing": {
+          "type": "object",
+          "properties": {
+            "input_per_1m": {"type": "number", "minimum": 0},
+            "output_per_1m": {"type": "number", "minimum": 0},
+            "cache_read_per_1m": {"type": "number", "minimum": 0},
+            "cache_write_per_1m": {"type": "number", "minimum": 0}
+          },
+          "description": "Pricing per 1M tokens (USD)"
+        },
+        "supported_parameters": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Model-specific supported parameters"
+        },
+        "unsupported_parameters": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Model-specific unsupported parameters"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Alternative model identifiers/aliases"
+        },
+        "deprecated": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this model is deprecated"
+        },
+        "release_date": {
+          "type": "string",
+          "format": "date",
+          "description": "Model release date"
+        }
+      }
+    }
+  }
+}

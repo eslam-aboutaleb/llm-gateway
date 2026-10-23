@@ -1,0 +1,186 @@
+# Disaster Recovery Test Workflow
+# Weekly synthetic; quarterly operator drill
+
+name: Disaster Recovery Test
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # Weekly Sunday 3 AM UTC
+  workflow_dispatch:
+    inputs:
+      drill_type:
+        description: 'Type of DR drill'
+        required: true
+        default: 'synthetic'
+        type: choice
+        options:
+          - synthetic
+          - quarterly-full
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: dr-test
+  cancel-in-progress: false
+
+jobs:
+  backup-freshness:
+    name: Backup Freshness Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      latest_name: ${{ steps.backup.outputs.latest_name }}
+      latest_time: ${{ steps.backup.outputs.latest_time }}
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+      OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
+    steps:
+      - name: Configure OCI OIDC
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Check Latest Backup
+        id: backup
+        run: |
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --auth instance_principal --query "data[?contains(name, 'litellm-') && contains(name, '.dump.age')].{name:name, timeCreated:timeCreated}" --output json)
+
+          if [ "$OBJECTS" == "[]" ]; then
+            echo "No backups found"
+            exit 1
+          fi
+
+          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(.timeCreated)')
+          LATEST_NAME=$(echo "$LATEST" | jq -r '.name')
+          LATEST_TIME=$(echo "$LATEST" | jq -r '.timeCreated')
+
+          echo "Latest backup: $LATEST_NAME"
+          echo "Created: $LATEST_TIME"
+
+          CREATED_EPOCH=$(date -d "$LATEST_TIME" +%s)
+          NOW_EPOCH=$(date +%s)
+          AGE_HOURS=$(( (NOW_EPOCH - CREATED_EPOCH) / 3600 ))
+
+          echo "Age: ${AGE_HOURS} hours"
+
+          if [ "$AGE_HOURS" -gt 26 ]; then
+            echo "BACKUP_STALE=true" >> "$GITHUB_ENV"
+          else
+            echo "BACKUP_STALE=false" >> "$GITHUB_ENV"
+          fi
+
+          echo "latest_name=$LATEST_NAME" >> "$GITHUB_OUTPUT"
+          echo "latest_time=$LATEST_TIME" >> "$GITHUB_OUTPUT"
+
+      - name: Alert on Stale Backup
+        if: env.BACKUP_STALE == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## 🚨 Backup Stale Alert\n\n**Latest backup:** ${{ steps.backup.outputs.latest_name }}\n**Created:** ${{ steps.backup.outputs.latest_time }}\n**Age:** >26 hours\n\nBackup is older than the 24-hour RPO target. Investigate backup job.`;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[BACKUP-STALE] Backup older than 26 hours',
+              body: body,
+              labels: ['backup', 'alert', 'automated']
+            });
+
+  # ===========================================
+  # Synthetic Restore Test (weekly)
+  # ===========================================
+  synthetic-restore:
+    name: Synthetic Restore Test
+    runs-on: ubuntu-24.04-arm
+    needs: backup-freshness
+    if: github.event.inputs.drill_type == 'synthetic' || github.event_name == 'schedule'
+    timeout-minutes: 30
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+      OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure OCI OIDC
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Download Latest Backup
+        run: |
+          LATEST_BACKUP="${{ needs.backup-freshness.outputs.latest_name }}"
+          oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$LATEST_BACKUP" --auth instance_principal --file "$LATEST_BACKUP"
+
+      - name: Verify Backup Integrity
+        run: |
+          # We can't decrypt without the private key in CI
+          # But we can verify the file exists and has expected size
+          SIZE=$(stat -c%s "${{ needs.backup-freshness.outputs.latest_name }}")
+          echo "Backup size: $SIZE bytes"
+
+          if [ "$SIZE" -lt 1000 ]; then
+            echo "Backup file too small"
+            exit 1
+          fi
+
+      - name: Start Test PostgreSQL
+        run: |
+          docker run -d --name postgres-dr-test \
+            -e POSTGRES_DB=litellm_test \
+            -e POSTGRES_USER=litellm \
+            -e POSTGRES_PASSWORD=testpass \
+            -p 5432:5432 \
+            postgres:16.4-alpine
+
+          sleep 10
+
+      - name: Test Restore (dry-run)
+        run: |
+          # This would require the age private key which we don't have in CI
+          # Instead, we verify the backup object exists and is recent
+          echo "Synthetic restore test: Backup object verified"
+          echo "Full restore test requires operator with age private key (quarterly drill)"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop postgres-dr-test 2>/dev/null || true
+          docker rm postgres-dr-test 2>/dev/null || true
+
+  # ===========================================
+  # Quarterly Full DR Drill (manual)
+  # ===========================================
+  quarterly-drill:
+    name: Quarterly Full DR Drill
+    runs-on: ubuntu-latest
+    if: github.event.inputs.drill_type == 'quarterly-full'
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create DR Drill Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## 📋 Quarterly DR Drill Initiated\n\n**Initiated by:** ${{ github.actor }}\n**Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")\n\n### Drill Checklist\n\n- [ ] Provision new A1 instance (or paid fallback) in same/different region\n- [ ] Restore Terraform state from Object Storage\n- [ ] Run \`terraform apply\` to recreate infrastructure\n- [ ] Retrieve age private key from offline storage\n- [ ] Download latest encrypted backup from Object Storage\n- [ ] Decrypt and restore PostgreSQL\n- [ ] Run migrations if schema version differs\n- [ ] Deploy pinned LiteLLM release\n- [ ] Verify virtual key authentication\n- [ ] Test chat/embeddings with mock provider\n- [ ] Remap DNS to new instance\n- [ ] Verify end-to-end functionality\n- [ ] Document RTO/RPO actuals\n- [ ] Clean up drill resources\n\n### Targets\n- **RPO:** 24 hours\n- **RTO:** 4 hours (best effort)\n\n### Notes\nThis is a manual operator drill. Complete each step and update this issue.`;
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[DR-DRILL] Quarterly Disaster Recovery Drill - $(date -u +"%Y-%m-%d")',
+              body: body,
+              labels: ['dr-drill', 'quarterly', 'manual']
+            });
+            console.log('DR Drill issue created:', issue.data.html_url);

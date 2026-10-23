@@ -1,0 +1,47 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Terraform
+*.tf text
+*.tfvars text
+*.hcl text
+*.tm.hcl text
+
+# Shell scripts
+*.sh text eol=lf
+
+# YAML
+*.yaml text
+*.yml text
+
+# JSON
+*.json text
+
+# Markdown
+*.md text
+
+# Docker
+Dockerfile text
+*.dockerfile text
+
+# Config
+*.conf text
+*.ini text
+
+# Scripts
+*.py text
+*.js text
+*.ts text
+
+# Binary files - no diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.age binary

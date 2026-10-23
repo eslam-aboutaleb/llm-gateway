@@ -1,0 +1,318 @@
+# Admin Operations Workflow
+# Replaces: admin-create-team.sh, admin-issue-key.sh, admin-revoke-key.sh
+# Manual dispatch for administrator operations via SSH tunnel
+
+name: Admin Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Admin operation to perform'
+        required: true
+        type: choice
+        options:
+          - create-team
+          - issue-key
+          - revoke-key
+          - list-keys
+          - list-teams
+      # create-team inputs
+      team_alias:
+        description: 'Team alias (for create-team)'
+        required: false
+        type: string
+      team_name:
+        description: 'Team display name (for create-team)'
+        required: false
+        type: string
+      budget:
+        description: 'Monthly budget in USD (for create-team)'
+        required: false
+        type: string
+        default: '100'
+      budget_duration:
+        description: 'Budget reset window (for create-team)'
+        required: false
+        type: string
+        default: '30d'
+      rpm_limit:
+        description: 'Requests per minute limit (for create-team)'
+        required: false
+        type: string
+        default: '100'
+      tpm_limit:
+        description: 'Tokens per minute limit (for create-team)'
+        required: false
+        type: string
+        default: '10000'
+      # issue-key inputs
+      key_alias:
+        description: 'Key alias (for issue-key)'
+        required: false
+        type: string
+      user_id:
+        description: 'User ID (for issue-key)'
+        required: false
+        type: string
+      team_id:
+        description: 'Team ID (for issue-key)'
+        required: false
+        type: string
+      models:
+        description: 'Comma-separated model aliases (for issue-key)'
+        required: false
+        type: string
+      key_budget:
+        description: 'Monthly budget in USD (for issue-key)'
+        required: false
+        type: string
+        default: '10'
+      duration:
+        description: 'Key expiry (for issue-key)'
+        required: false
+        type: string
+        default: '30d'
+      key_rpm:
+        description: 'Requests per minute (for issue-key)'
+        required: false
+        type: string
+        default: '20'
+      key_tpm:
+        description: 'Tokens per minute (for issue-key)'
+        required: false
+        type: string
+        default: '2000'
+      parallel:
+        description: 'Max parallel requests (for issue-key)'
+        required: false
+        type: string
+        default: '2'
+      metadata:
+        description: 'JSON metadata (for issue-key)'
+        required: false
+        type: string
+        default: '{}'
+      # revoke-key inputs
+      key_identifier:
+        description: 'Key alias or ID to revoke (for revoke-key)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  admin-operations:
+    name: Admin Operation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LITELLM_URL: http://localhost:4000
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate operation inputs
+        run: |
+          case "${{ github.event.inputs.operation }}" in
+            create-team)
+              if [[ -z "${{ github.event.inputs.team_alias }}" || -z "${{ github.event.inputs.team_name }}" ]]; then
+                echo "team_alias and team_name required for create-team"
+                exit 1
+              fi
+              ;;
+            issue-key)
+              if [[ -z "${{ github.event.inputs.key_alias }}" || -z "${{ github.event.inputs.user_id }}" || -z "${{ github.event.inputs.team_id }}" || -z "${{ github.event.inputs.models }}" ]]; then
+                echo "key_alias, user_id, team_id, and models required for issue-key"
+                exit 1
+              fi
+              ;;
+            revoke-key)
+              if [[ -z "${{ github.event.inputs.key_identifier }}" ]]; then
+                echo "key_identifier required for revoke-key"
+                exit 1
+              fi
+              ;;
+          esac
+
+      - name: Execute admin operation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const operation = '${{ github.event.inputs.operation }}';
+            const url = process.env.LITELLM_URL || 'http://localhost:4000';
+            const masterKey = process.env.LITELLM_MASTER_KEY;
+            
+            if (!masterKey) {
+              console.error('LITELLM_MASTER_KEY not set');
+              process.exit(1);
+            }
+
+            async function apiCall(method, endpoint, body = null) {
+              const response = await fetch(`${url}${endpoint}`, {
+                method,
+                headers: {
+                  'Authorization': `Bearer ${masterKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: body ? JSON.stringify(body) : undefined,
+              });
+              const text = await response.text();
+              return { status: response.status, data: text };
+            }
+
+            try {
+              switch (operation) {
+                case 'create-team': {
+                  const { team_alias, team_name, budget, budget_duration, rpm_limit, tpm_limit } = {
+                    team_alias: '${{ github.event.inputs.team_alias }}',
+                    team_name: '${{ github.event.inputs.team_name }}',
+                    budget: parseInt('${{ github.event.inputs.budget }}'),
+                    budget_duration: '${{ github.event.inputs.budget_duration }}',
+                    rpm_limit: parseInt('${{ github.event.inputs.rpm_limit }}'),
+                    tpm_limit: parseInt('${{ github.event.inputs.tpm_limit }}'),
+                  };
+                  
+                  const result = await apiCall('POST', '/team/new', {
+                    team_alias,
+                    team_name,
+                    max_budget: budget,
+                    budget_duration,
+                    rpm_limit,
+                    tpm_limit,
+                    max_parallel_requests: 10,
+                  });
+                  
+                  if (result.status === 200) {
+                    const data = JSON.parse(result.data);
+                    console.log('✓ Team created successfully');
+                    console.log('Team ID:', data.team_id);
+                    console.log('Team Alias:', team_alias);
+                  } else {
+                    console.error('Failed to create team:', result.status, result.data);
+                    process.exit(1);
+                  }
+                  break;
+                }
+                
+                case 'issue-key': {
+                  const { key_alias, user_id, team_id, models, key_budget, duration, key_rpm, key_tpm, parallel, metadata } = {
+                    key_alias: '${{ github.event.inputs.key_alias }}',
+                    user_id: '${{ github.event.inputs.user_id }}',
+                    team_id: '${{ github.event.inputs.team_id }}',
+                    models: '${{ github.event.inputs.models }}'.split(',').map(m => m.trim()),
+                    key_budget: parseInt('${{ github.event.inputs.key_budget }}'),
+                    duration: '${{ github.event.inputs.duration }}',
+                    key_rpm: parseInt('${{ github.event.inputs.key_rpm }}'),
+                    key_tpm: parseInt('${{ github.event.inputs.key_tpm }}'),
+                    parallel: parseInt('${{ github.event.inputs.parallel }}'),
+                    metadata: JSON.parse('${{ github.event.inputs.metadata }}'),
+                  };
+                  
+                  const result = await apiCall('POST', '/key/generate', {
+                    key_alias,
+                    user_id,
+                    team_id,
+                    models,
+                    max_budget: key_budget,
+                    budget_duration: '${{ github.event.inputs.duration }}',
+                    duration,
+                    rpm_limit: key_rpm,
+                    tpm_limit: key_tpm,
+                    max_parallel_requests: parallel,
+                    allowed_routes: ['llm_api_routes'],
+                    metadata,
+                  });
+                  
+                  if (result.status === 200) {
+                    const data = JSON.parse(result.data);
+                    console.log('✓ Key issued successfully');
+                    console.log('Key Alias:', key_alias);
+                    console.log('Key Name:', data.key_name);
+                    console.log('');
+                    console.log('=== KEY DETAILS (PRIVATE - DELIVER SECURELY) ===');
+                    console.log('Key Value:', data.key);
+                    console.log('');
+                    console.log('⚠️  DELIVER THIS KEY THROUGH APPROVED SECRET-SHARING CHANNEL ONLY');
+                    console.log('⚠️  DO NOT POST IN GITHUB, EMAIL, CHAT, OR LOGS');
+                  } else {
+                    console.error('Failed to issue key:', result.status, result.data);
+                    process.exit(1);
+                  }
+                  break;
+                }
+                
+                case 'revoke-key': {
+                  const key_identifier = '${{ github.event.inputs.key_identifier }}';
+                  
+                  // First, list keys to find the key_id
+                  const listResult = await apiCall('GET', '/key/list');
+                  if (listResult.status !== 200) {
+                    console.error('Failed to list keys:', listResult.status, listResult.data);
+                    process.exit(1);
+                  }
+                  
+                  const keys = JSON.parse(listResult.data).keys || [];
+                  const key = keys.find(k => k.key_alias === key_identifier || k.key_id === key_identifier);
+                  
+                  if (!key) {
+                    console.error('Key not found:', key_identifier);
+                    process.exit(1);
+                  }
+                  
+                  console.log('Found key:');
+                  console.log('  Key ID:', key.key_id);
+                  console.log('  Alias:', key.key_alias);
+                  console.log('  User:', key.user_id);
+                  console.log('  Team:', key.team_id);
+                  
+                  const revokeResult = await apiCall('POST', '/key/revoke', {
+                    key_id: key.key_id,
+                  });
+                  
+                  if (revokeResult.status === 200) {
+                    console.log('✓ Key revoked successfully');
+                    console.log('Key Alias:', key.key_alias);
+                    console.log('Key ID:', key.key_id);
+                  } else {
+                    console.error('Failed to revoke key:', revokeResult.status, revokeResult.data);
+                    process.exit(1);
+                  }
+                  break;
+                }
+                
+                case 'list-keys': {
+                  const result = await apiCall('GET', '/key/list');
+                  if (result.status === 200) {
+                    const data = JSON.parse(result.data);
+                    console.log('Keys:');
+                    console.log(JSON.stringify(data, null, 2));
+                  } else {
+                    console.error('Failed to list keys:', result.status, result.data);
+                    process.exit(1);
+                  }
+                  break;
+                }
+                
+                case 'list-teams': {
+                  const result = await apiCall('GET', '/team/list');
+                  if (result.status === 200) {
+                    const data = JSON.parse(result.data);
+                    console.log('Teams:');
+                    console.log(JSON.stringify(data, null, 2));
+                  } else {
+                    console.error('Failed to list teams:', result.status, result.data);
+                    process.exit(1);
+                  }
+                  break;
+                }
+              }
+            } catch (error) {
+              console.error('Error:', error);
+              process.exit(1);
+            }
+        env:
+          LITELLM_URL: ${{ env.LITELLM_URL }}
+          LITELLM_MASTER_KEY: ${{ env.LITELLM_MASTER_KEY }}

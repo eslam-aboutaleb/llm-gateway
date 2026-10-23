@@ -1,0 +1,16 @@
+# Example Terraform variables for production stack
+# Copy to terraform.tfvars and fill in actual values
+
+oci_region                    = "us-ashburn-1"
+oci_tenancy_ocid              = "ocid1.tenancy.oc1..xxxxxx"
+oci_user_ocid                 = "ocid1.user.oc1..xxxxxx"
+oci_compartment_ocid          = "ocid1.compartment.oc1..xxxxxx"
+oci_object_storage_namespace  = "mynamespace"
+oci_ssh_public_key            = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+gateway_dns_domain            = "llm.example.com"
+acme_email                    = "admin@example.com"
+backup_age_public_key         = "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+oci_backup_bucket             = "backups-ocid1.tenancy.oc1..xxxxxx"
+github_repository             = "eslam-aboutaleb/llm-gateway"
+oci_oidc_provider_url         = "https://token.actions.githubusercontent.com"
+# alert_webhook_url           = "https://hooks.slack.com/services/..."  # Optional

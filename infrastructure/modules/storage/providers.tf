@@ -1,0 +1,1 @@
+# Provider configurations are inherited from the root stack module.

@@ -1,0 +1,225 @@
+# Release Workflow
+# Runs on tag/manual approval - lock digests, sign/version release manifest, publish to OCI
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+      litellm_digest:
+        description: 'LiteLLM image digest (sha256:...)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  packages: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    outputs:
+      release_tag: ${{ steps.version.outputs.tag }}
+      manifest_digest: ${{ steps.outputs.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get LiteLLM Digest
+        id: digest
+        run: |
+          if [ -n "${{ github.event.inputs.litellm_digest }}" ]; then
+            echo "digest=${{ github.event.inputs.litellm_digest }}" >> "$GITHUB_OUTPUT"
+          else
+            # Try to get from compose file
+            DIGEST=$(grep -o 'sha256:[a-f0-9]*' gateway/compose.prod.yaml | head -1 | sed 's/sha256://')
+            if [ -n "$DIGEST" ]; then
+              echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+            else
+              echo "No digest found - must provide manually"
+              exit 1
+            fi
+          fi
+
+      - name: Verify Image Exists
+        run: |
+          docker pull "ghcr.io/berriai/litellm:${{ steps.version.outputs.tag }}@sha256:${{ steps.digest.outputs.digest }}"
+
+      - name: Generate Release Manifest
+        id: manifest
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          DIGEST="${{ steps.digest.outputs.digest }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT="${{ github.sha }}"
+
+          cat > manifest.json <<EOF
+          {
+            "version": "$TAG",
+            "timestamp": "$TIMESTAMP",
+            "commit": "$COMMIT",
+            "litellm_image": "ghcr.io/berriai/litellm",
+            "litellm_tag": "$TAG",
+            "litellm_digest": "sha256:$DIGEST",
+            "litellm_image_digest": "sha256:$DIGEST",
+            "compose_files": [
+              "compose.yaml",
+              "compose.prod.yaml"
+            ],
+            "config_files": [
+              "config/litellm.yaml",
+              "config/model-catalog.yaml"
+            ],
+            "caddy_file": "caddy/Caddyfile",
+            "workflows": [
+              "ci.yml",
+              "arm64-compatibility.yml",
+              "infra-plan.yml",
+              "infra-apply.yml",
+              "release.yml",
+              "deploy.yml",
+              "drift.yml",
+              "disaster-recovery-test.yml",
+              "backup-restore.yml",
+              "admin-operations.yml",
+              "smoke-test.yml"
+            ]
+          }
+          EOF
+
+          jq . manifest.json
+
+      - name: Sign Manifest
+        id: sign
+        if: env.COSIGN_PRIVATE_KEY != ''
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --output-signature manifest.json.sig manifest.json
+          echo "Manifest signed"
+
+      - name: Create Release Archive
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          mkdir -p "release-$TAG"
+          cp manifest.json "release-$TAG/"
+          cp manifest.json.sig "release-$TAG/" 2>/dev/null || true
+          cp gateway/compose.yaml "release-$TAG/"
+          cp gateway/compose.prod.yaml "release-$TAG/"
+          cp gateway/caddy/Caddyfile "release-$TAG/"
+          cp gateway/config/litellm.yaml "release-$TAG/"
+          cp gateway/config/model-catalog.yaml "release-$TAG/"
+          tar -czf "release-$TAG.tar.gz" "release-$TAG"
+          echo "Release archive created: release-$TAG.tar.gz"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.version.outputs.tag }}
+          path: |
+            manifest.json
+            manifest.json.sig
+            release-*.tar.gz
+          retention-days: 90
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body: |
+            ## llm-gateway Release ${{ steps.version.outputs.tag }}
+
+            **Commit:** ${{ github.sha }}
+
+            ### Artifacts
+            - Release manifest (signed)
+            - Docker Compose configuration
+            - LiteLLM configuration
+            - Caddy configuration
+            - Operational scripts
+
+            ### Image
+            - LiteLLM: ghcr.io/berriai/litellm:${{ steps.version.outputs.tag }}@sha256:${{ steps.digest.outputs.digest }}
+
+            ### Deployment
+            Deploy using the `deploy` workflow.
+
+          files: |
+            manifest.json
+            manifest.json.sig
+            release-${{ steps.version.outputs.tag }}.tar.gz
+
+      - name: Set Outputs
+        id: outputs
+        run: |
+          echo "tag=${{ steps.version.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          echo "digest=sha256:${{ steps.digest.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  # ===========================================
+  # Publish to OCI Object Storage
+  # ===========================================
+  publish-oci:
+    name: Publish to OCI
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: vars.OCI_OBJECT_STORAGE_NAMESPACE != '' && vars.OCI_RELEASE_BUCKET != ''
+    timeout-minutes: 15
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+      OCI_RELEASE_BUCKET: ${{ vars.OCI_RELEASE_BUCKET }}
+    steps:
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build-release.outputs.release_tag }}
+          path: release-artifacts
+
+      - name: Configure OCI OIDC
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Upload to OCI Object Storage
+        run: |
+          TAG="${{ needs.build-release.outputs.release_tag }}"
+          cd release-artifacts
+          for file in *; do
+            oci os object put --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_RELEASE_BUCKET" --file "$file" --name "$TAG/$file" --auth instance_principal
+          done
+          echo "Release published to OCI Object Storage"
+
+      - name: Verify Upload
+        run: |
+          TAG="${{ needs.build-release.outputs.release_tag }}"
+          oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_RELEASE_BUCKET" --prefix "$TAG/" --auth instance_principal

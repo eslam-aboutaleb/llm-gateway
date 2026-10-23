@@ -1,0 +1,387 @@
+# Docker Compose for llm-gateway (Production)
+# Base configuration - extended by compose.prod.yaml
+
+services:
+  # ===========================================
+  # PostgreSQL Database
+  # ===========================================
+  postgres:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    platform: linux/arm64
+    container_name: llm-gateway-postgres
+    user: "999:999"
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - llm-gateway-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql:uid=999,gid=999,mode=750
+      - /tmp:uid=999,gid=999,mode=750
+
+  # ===========================================
+  # Redis Cache/Rate Limiting
+  # ===========================================
+  redis:
+    image: redis:7.4-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    platform: linux/arm64
+    container_name: llm-gateway-redis
+    user: "999:999"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - llm-gateway-internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --raw incr healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:uid=999,gid=999,mode=750
+
+  # ===========================================
+  # LiteLLM Database Schema Migration (One-Off)
+  # ===========================================
+  litellm-migrate:
+    image: ghcr.io/berriai/litellm:main-v1.46.1@sha256:622532490d9161c51db67d0bc4027bdd35aaf8c0aef091647765b6fdd78b3d48
+    platform: linux/arm64
+    container_name: llm-gateway-litellm-migrate
+    user: "1000:1000"
+    entrypoint:
+      - python3
+      - -c
+      - "import os, litellm.proxy, runpy; os.chdir(os.path.dirname(litellm.proxy.__file__)); runpy.run_module('litellm.proxy.prisma_migration', run_name='__main__')"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - DIRECT_URL=${DATABASE_URL}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - DISABLE_SCHEMA_UPDATE=False
+    networks:
+      - llm-gateway-internal
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+      restart_policy:
+        condition: none
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=750
+      - /var/run:uid=1000,gid=1000,mode=750
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ===========================================
+  # LiteLLM Proxy
+  # ===========================================
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.46.1@sha256:622532490d9161c51db67d0bc4027bdd35aaf8c0aef091647765b6fdd78b3d48
+    platform: linux/arm64
+    container_name: llm-gateway-litellm
+    user: "1000:1000"
+    command: ["--config", "/app/config/litellm.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    environment:
+      - LITELLM_CONFIG=/app/config/litellm.yaml
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - LITELLM_UI_PASSWORD=${LITELLM_UI_PASSWORD}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AZURE_API_KEY=${AZURE_API_KEY}
+      - AZURE_API_BASE=${AZURE_API_BASE}
+      - AZURE_API_VERSION=${AZURE_API_VERSION}
+      - VERTEX_PROJECT=${VERTEX_PROJECT}
+      - VERTEX_LOCATION=${VERTEX_LOCATION}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      - AWS_REGION_NAME=${AWS_REGION_NAME}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - AWS_ROLE_NAME=${AWS_ROLE_NAME}
+      - DISABLE_SCHEMA_UPDATE=True
+      - LITELLM_LOG=INFO
+      - PORT=4000
+      - HOST=0.0.0.0
+      - NUM_WORKERS=1
+      - UVICORN_WORKERS=1
+    volumes:
+      - ./config/litellm.yaml:/app/config/litellm.yaml:ro
+      - ./config/model-catalog.yaml:/app/config/model-catalog.yaml:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks:
+      - llm-gateway-internal
+      - llm-gateway-caddy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "http://localhost:4000/health/readiness",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 6G
+        reservations:
+          cpus: "1.0"
+          memory: 4G
+      restart_policy:
+        condition: on-failure
+        delay: 15s
+        max_attempts: 3
+        window: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=750
+      - /var/run:uid=1000,gid=1000,mode=750
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      litellm-migrate:
+        condition: service_completed_successfully
+
+  # ===========================================
+  # Caddy Reverse Proxy
+  # ===========================================
+  caddy:
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
+    platform: linux/arm64
+    container_name: llm-gateway-caddy
+    user: "1000:1000"
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - GATEWAY_DNS_DOMAIN=${GATEWAY_DNS_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - llm-gateway-caddy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "caddy",
+          "validate",
+          "--config",
+          "/etc/caddy/Caddyfile",
+          "--adapter",
+          "caddyfile",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=750
+      - /var/run:uid=1000,gid=1000,mode=750
+    depends_on:
+      litellm:
+        condition: service_healthy
+
+  # ===========================================
+  # Node Exporter (Host Metrics)
+  # ===========================================
+  node-exporter:
+    image: prom/node-exporter:v1.8.2@sha256:4032c6d5bfd752342c3e631c2f1de93ba6b86c41db6b167b9a35372c139e7706
+    platform: linux/arm64
+    container_name: llm-gateway-node-exporter
+    user: "65534:65534"
+    pid: host
+    network_mode: host
+    volumes:
+      - /:/host:ro,rslave
+      - /proc:/host/proc:ro,rslave
+      - /sys:/host/sys:ro,rslave
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+
+# ===========================================
+# Networks
+# ===========================================
+networks:
+  llm-gateway-internal:
+    name: llm-gateway-internal
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+  llm-gateway-caddy:
+    name: llm-gateway-caddy
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+
+# ===========================================
+# Volumes
+# ===========================================
+volumes:
+  postgres_data:
+    name: llm-gateway-postgres-data
+    driver: local
+  redis_data:
+    name: llm-gateway-redis-data
+    driver: local
+  caddy_data:
+    name: llm-gateway-caddy-data
+    driver: local
+  caddy_config:
+    name: llm-gateway-caddy-config
+    driver: local
+
+# ===========================================
+# Secrets
+# ===========================================
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt

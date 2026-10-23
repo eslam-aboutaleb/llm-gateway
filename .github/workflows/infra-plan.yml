@@ -1,0 +1,204 @@
+# Infrastructure Plan Workflow
+# Runs on trusted PR / manual - OIDC assumed role, remote-state Terraform plan
+
+name: Infra Plan
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'infrastructure/**'
+      - 'cloud-init/**'
+      - '.github/workflows/infra-plan.yml'
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Terramate stack to plan'
+        required: true
+        default: 'oci-production'
+        type: choice
+        options:
+          - oci-production
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: infra-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    # Only run on trusted PRs (from repo, not forks) or manual dispatch
+    if: github.event_name == 'workflow_dispatch' || github.repository == github.event.pull_request.head.repo.full_name
+    timeout-minutes: 30
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.x"
+          terraform_wrapper: true
+
+      - name: Setup Terramate
+        uses: terramate-io/terramate-action@v1
+        with:
+          version: "latest"
+
+      - name: Configure OCI OIDC
+        id: oci-auth
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Terramate Generate
+        run: terramate generate
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform init -input=false \
+            -backend-config="bucket=tfstate-${OCI_TENANCY_OCID}" \
+            -backend-config="region=${OCI_REGION}" \
+            -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+
+      - name: Terraform Plan
+        id: tfplan
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform plan -input=false -out=tfplan.out
+          terraform show -json tfplan.out > tfplan.json
+
+      - name: Generate Plan Summary
+        id: summary
+        run: |
+          cd infrastructure/stacks/oci/production
+          # Create human-readable summary
+          cat > plan-summary.md <<'EOF'
+          # Terraform Plan Summary
+          **Stack:** oci-production
+          **Commit:** ${{ github.sha }}
+          **Branch:** ${{ github.ref_name }}
+          **Triggered by:** ${{ github.actor }}
+
+          ## Plan Output
+          EOF
+          terraform show -no-color tfplan.out >> plan-summary.md
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: |
+            infrastructure/stacks/oci/production/tfplan.out
+            infrastructure/stacks/oci/production/tfplan.json
+            infrastructure/stacks/oci/production/plan-summary.md
+          retention-days: 7
+
+      - name: Comment PR with Plan Summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('infrastructure/stacks/oci/production/plan-summary.md', 'utf8');
+            const body = `## 🏗️ Terraform Plan Summary\n\n${summary}\n\n---\n*Plan generated from commit ${{ github.sha }}*`;
+            github.rest.issues.createComment({
+              issue_number: ${{ github.event.pull_request.number }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Save Plan SHA for Apply
+        id: plan_sha
+        run: |
+          echo "PLAN_SHA=${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "PLAN_SHA=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      plan_sha: ${{ steps.plan_sha.outputs.PLAN_SHA }}
+
+  # ===========================================
+  # Drift Detection (separate job)
+  # ===========================================
+  drift:
+    name: Drift Detection
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 20
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.x"
+
+      - name: Configure OCI OIDC
+        uses: oracle/oci-cli-action@v1
+        with:
+          version: "latest"
+          oci_region: ${{ env.OCI_REGION }}
+          auth_type: "workload_identity"
+          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Terramate Generate
+        run: terramate generate
+
+      - name: Terraform Refresh & Plan (drift detection)
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform init -input=false \
+            -backend-config="bucket=tfstate-${OCI_TENANCY_OCID}" \
+            -backend-config="region=${OCI_REGION}" \
+            -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+          terraform refresh -input=false
+          DRIFT_CODE=0
+          terraform plan -input=false -detailed-exitcode || DRIFT_CODE=$?
+          if [ "${DRIFT_CODE}" == "2" ]; then
+            echo "DRIFT_DETECTED=true" >> "$GITHUB_ENV"
+            terraform show -no-color > drift-summary.txt
+          elif [ "${DRIFT_CODE}" == "1" ]; then
+            echo "Terraform error"
+            exit 1
+          else
+            echo "DRIFT_DETECTED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Report Drift
+        if: env.DRIFT_DETECTED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const drift = fs.readFileSync('infrastructure/stacks/oci/production/drift-summary.txt', 'utf8');
+            const body = `## ⚠️ Infrastructure Drift Detected\n\n\`\`\`\n${drift}\n\`\`\`\n\nPlease review and apply necessary changes.`;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '[DRIFT] Infrastructure drift detected',
+              body: body,
+              labels: ['drift', 'infrastructure']
+            });

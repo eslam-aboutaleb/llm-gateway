@@ -1,0 +1,135 @@
+name: Request Gateway Access
+description: Request a LiteLLM virtual API key for the LLM Gateway
+title: "[ACCESS] <project-name> - <environment>"
+labels: ["access-request", "needs-review"]
+assignees:
+  - eslam-aboutaleb
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Request Gateway Access
+
+        This form requests a **LiteLLM virtual API key** for the LLM Gateway. The gateway is private to approved users/services despite having a public HTTPS endpoint.
+
+        **Important:** Do not post secrets, credentials, or sensitive data in this issue. If even project metadata is sensitive, contact the administrator for a private intake option before submitting.
+
+  - type: input
+    id: requester
+    attributes:
+      label: Requester GitHub Identity
+      description: Your GitHub username or identity (e.g., @username)
+      placeholder: "@github-user"
+    validations:
+      required: true
+
+  - type: input
+    id: application
+    attributes:
+      label: Application / Team Name
+      description: Name of the application, service, or team requesting access
+      placeholder: "sample-service"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: Target environment for this key
+      options:
+        - development
+        - staging
+        - production
+    validations:
+      required: true
+
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Purpose / Use Case
+      description: Describe what you'll use the gateway for
+      placeholder: "Generate short knowledge-base summaries for internal documentation"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: required_api
+    attributes:
+      label: Required API Operations
+      description: Select the API operations you need
+      options:
+        - label: Chat Completions (`/v1/chat/completions`)
+        - label: Embeddings (`/v1/embeddings`)
+        - label: Models List (`/v1/models`)
+
+  - type: textarea
+    id: model_aliases
+    attributes:
+      label: Requested Model Aliases
+      description: List the model aliases you need access to (admin will approve subset)
+      placeholder: "general-fast, rag-embedding"
+    validations:
+      required: true
+
+  - type: input
+    id: rpm
+    attributes:
+      label: Approximate Requests Per Minute (RPM)
+      description: Expected peak requests per minute
+      placeholder: "10"
+    validations:
+      required: true
+
+  - type: input
+    id: tpm
+    attributes:
+      label: Approximate Tokens Per Minute (TPM)
+      description: Expected peak tokens per minute
+      placeholder: "2000"
+    validations:
+      required: true
+
+  - type: input
+    id: budget
+    attributes:
+      label: Monthly Budget (USD)
+      description: Requested monthly spending limit
+      placeholder: "5"
+    validations:
+      required: true
+
+  - type: input
+    id: expiry
+    attributes:
+      label: Key Expiration
+      description: Requested key lifetime (e.g., 30d, 90d, 180d)
+      placeholder: "30d"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data_sensitivity
+    attributes:
+      label: Data Sensitivity
+      description: Will request content contain sensitive or regulated data?
+      options:
+        - "Synthetic/non-sensitive only"
+        - "Internal business data (non-regulated)"
+        - "PII / regulated data (requires explicit approval)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgments
+    attributes:
+      label: Acknowledgments
+      options:
+        - label: I understand keys are delivered privately via approved secret-sharing, not in GitHub comments
+          required: true
+        - label: I will store the key server-side only (no browser/client exposure)
+          required: true
+        - label: I will not share keys across projects or environments
+          required: true
+        - label: I have read the Key Policy (docs/KEY_POLICY.md)
+          required: true

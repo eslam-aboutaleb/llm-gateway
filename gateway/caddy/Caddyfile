@@ -1,0 +1,121 @@
+# Caddyfile for llm-gateway
+# Public HTTPS ingress with explicit route allowlist
+# Management routes blocked at public ingress
+
+{
+    # Global options
+    admin off  # Disable admin API entirely
+    auto_https disable_redirects  # We handle redirects explicitly
+
+    # Logging
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# HTTP -> HTTPS redirect + ACME challenge
+http://{$GATEWAY_DNS_DOMAIN} {
+    # Redirect all other HTTP to HTTPS
+    redir https://{host}{uri} 308
+}
+
+# Main HTTPS endpoint
+https://{$GATEWAY_DNS_DOMAIN} {
+    # TLS configuration
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    }
+
+    # Headers
+    header {
+        # Security headers
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "interest-cohort=()"
+        # Remove server header
+        -Server
+        # CORS (restrict to known origins if needed)
+        # Access-Control-Allow-Origin "https://your-app.example.com"
+    }
+
+    # Trust X-Forwarded-* headers from our own reverse proxy only
+    # trusted_proxies private_ranges
+
+    # ===========================================
+    # PUBLIC INFERENCE ROUTES (ALLOWLIST ONLY)
+    # ===========================================
+
+    # Chat Completions
+    @chat_completions path /v1/chat/completions
+    handle @chat_completions {
+        reverse_proxy litellm:4000 {
+            transport http {
+                read_timeout 300s
+                write_timeout 300s
+            }
+            # SSE support for streaming
+            flush_interval -1
+        }
+    }
+
+    # Embeddings
+    @embeddings path /v1/embeddings
+    handle @embeddings {
+        reverse_proxy litellm:4000 {
+            transport http {
+                read_timeout 120s
+                write_timeout 120s
+            }
+        }
+    }
+
+    # Models List
+    @models path /v1/models
+    handle @models {
+        reverse_proxy litellm:4000
+    }
+
+    # Health/Status (minimal unauthenticated liveness check)
+    # Rewrites to LiteLLM's unauthenticated /health/liveliness endpoint so public
+    # health checks neither require a master key nor leak /health/readiness metadata.
+    @health path /health /ready /status
+    handle @health {
+        rewrite * /health/liveliness
+        reverse_proxy litellm:4000
+    }
+
+    # ===========================================
+    # DENY ALL OTHER ROUTES (MANAGEMENT, ADMIN, etc.)
+    # ===========================================
+
+    # Explicitly block management routes at public ingress
+    # These are accessible ONLY via SSH tunnel to localhost:4000
+    @blocked_management path /ui* /key* /team* /user* /config* /spend* /model* /provider* /callback* /litellm* /health/readiness* /health/liveness* /metrics* /docs* /openapi* /redoc* /swagger*
+    handle @blocked_management {
+        respond "Not Found" 404
+    }
+
+    # Block any other paths not explicitly allowed
+    @blocked_other path *
+    handle @blocked_other {
+        respond "Not Found" 404
+    }
+
+    # ===========================================
+    # ERROR HANDLING
+    # ===========================================
+
+    # Custom error pages (optional)
+    handle_errors {
+        @5xx expression {http.error.status_code} >= 500
+        respond @5xx "Service temporarily unavailable" 503
+
+        @4xx expression {http.error.status_code} >= 400 && {http.error.status_code} < 500
+        respond @4xx "Bad Request" 400
+    }
+}
