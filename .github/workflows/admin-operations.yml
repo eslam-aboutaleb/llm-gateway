@@ -112,7 +112,7 @@ jobs:
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate operation inputs
         run: |
