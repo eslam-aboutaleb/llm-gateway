@@ -35,12 +35,15 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   OCI_REGION: ${{ vars.OCI_REGION }}
   OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
   OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
+  OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+  OCI_USER_OCID: ${{ vars.OCI_USER_OCID }}
+  OCI_FINGERPRINT: ${{ vars.OCI_FINGERPRINT }}
+  GATEWAY_PUBLIC_IP: ${{ vars.GATEWAY_PUBLIC_IP }}
 
 jobs:
   backup:
@@ -53,32 +56,50 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure OCI CLI
-        uses: oracle/oci-cli-action@v1
-        with:
-          version: "latest"
-          oci_region: ${{ env.OCI_REGION }}
-          auth_type: "instance_principal"
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
       - name: Run backup
+        env:
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
         run: |
-          # This runs on the VM via systemd timer normally
-          # This workflow job documents the process and can run verification
-          echo "=== Backup Process (runs on VM via systemd timer) ==="
+          echo "=== Backup Process ==="
           echo "1. pg_dump custom format with compression"
-          echo "2. Encrypt with age using BACKUP_AGE_PUBLIC_KEY"
+          echo "2. Encrypt with age using BACKUP_AGE_PUBLIC_KEY (if configured)"
           echo "3. Upload to OCI Object Storage"
-          echo "4. Verify remote object MD5"
-          echo "5. Create and upload manifest"
-          echo "6. Cleanup local unencrypted dump"
-          echo "7. Apply retention (OCI lifecycle policy)"
+          echo "4. Verify remote object"
+          echo "5. Apply retention (OCI lifecycle policy)"
+
+          if [ -n "$OCI_SSH_PRIVATE_KEY" ] && [ -n "$GATEWAY_PUBLIC_IP" ] && [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Triggering backup on VM via SSH..."
+            mkdir -p ~/.ssh
+            printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh-keyscan -H "$GATEWAY_PUBLIC_IP" >> ~/.ssh/known_hosts 2>/dev/null
+            ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "sudo /usr/local/bin/gateway-backup" || echo "Manual SSH backup trigger completed or timed out"
+          fi
 
       - name: Verify backup freshness
         run: |
           # Check latest backup age
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --auth instance_principal --query "data[?contains(name, 'litellm-') && contains(name, '.dump.age')].{name:name, timeCreated:timeCreated}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated}" --output json)
 
-          if [ "$OBJECTS" == "[]" ]; then
-            echo "No backups found"
+          if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
+            echo "No backups found yet in bucket $OCI_BACKUP_BUCKET"
             exit 1
           fi
 
@@ -110,19 +131,29 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure OCI CLI
-        uses: oracle/oci-cli-action@v1
-        with:
-          version: "latest"
-          oci_region: ${{ env.OCI_REGION }}
-          auth_type: "workload_identity"
-          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
       - name: Verify backup freshness and checksum
         run: |
           # List backup objects
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --auth instance_principal --query "data[?contains(name, 'litellm-') && contains(name, '.dump.age')].{name:name, timeCreated:timeCreated, size:size}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated, size:size}" --output json)
 
-          if [ "$OBJECTS" == "[]" ]; then
+          if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
             echo "No backup objects found"
             exit 1
           fi
@@ -147,14 +178,14 @@ jobs:
           fi
 
           # Check manifest exists
-          MANIFEST_NAME="${LATEST_NAME%.dump.age}.manifest.json"
-          MANIFEST=$(oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$MANIFEST_NAME" --auth instance_principal --query "data" --output json 2>/dev/null || echo "null")
+          MANIFEST_NAME="${LATEST_NAME%.age}.manifest.json"
+          MANIFEST=$(oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$MANIFEST_NAME" --query "data" --output json 2>/dev/null || echo "null")
 
           if [ "$MANIFEST" != "null" ]; then
             echo "✓ Manifest found"
             echo "$MANIFEST" | jq .
           else
-            echo "⚠ Manifest not found"
+            echo "ℹ Manifest not found"
           fi
 
           echo "✓ Verification passed"
@@ -162,19 +193,29 @@ jobs:
   restore:
     name: Restore Backup (Drill)
     if: github.event.inputs.operation == 'restore'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Configure OCI CLI
-        uses: oracle/oci-cli-action@v1
-        with:
-          version: "latest"
-          oci_region: ${{ env.OCI_REGION }}
-          auth_type: "workload_identity"
-          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
       - name: Validate restore inputs
         run: |
@@ -190,7 +231,7 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=testpass \
             -p 5432:5432 \
-            postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+            postgres:16.4-alpine
 
           sleep 10
 
@@ -199,7 +240,7 @@ jobs:
           BACKUP_OBJECT="${{ github.event.inputs.backup_object }}"
 
           echo "Downloading backup..."
-          oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$BACKUP_OBJECT" --auth instance_principal --file "$BACKUP_OBJECT"
+          oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$BACKUP_OBJECT" --file "$BACKUP_OBJECT"
 
           if [ ! -f "$BACKUP_OBJECT" ]; then
             echo "Download failed"

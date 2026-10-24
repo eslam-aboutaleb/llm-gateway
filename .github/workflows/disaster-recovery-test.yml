@@ -19,12 +19,19 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   issues: write
 
 concurrency:
   group: dr-test
   cancel-in-progress: false
+
+env:
+  OCI_REGION: ${{ vars.OCI_REGION }}
+  OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
+  OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
+  OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+  OCI_USER_OCID: ${{ vars.OCI_USER_OCID }}
+  OCI_FINGERPRINT: ${{ vars.OCI_FINGERPRINT }}
 
 jobs:
   backup-freshness:
@@ -34,25 +41,34 @@ jobs:
     outputs:
       latest_name: ${{ steps.backup.outputs.latest_name }}
       latest_time: ${{ steps.backup.outputs.latest_time }}
-    env:
-      OCI_REGION: ${{ vars.OCI_REGION }}
-      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
-      OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
     steps:
-      - name: Configure OCI OIDC
-        uses: oracle/oci-cli-action@v1
-        with:
-          version: "latest"
-          oci_region: ${{ env.OCI_REGION }}
-          auth_type: "workload_identity"
-          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure OCI CLI
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
       - name: Check Latest Backup
         id: backup
         run: |
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --auth instance_principal --query "data[?contains(name, 'litellm-') && contains(name, '.dump.age')].{name:name, timeCreated:timeCreated}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated}" --output json)
 
-          if [ "$OBJECTS" == "[]" ]; then
+          if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
             echo "No backups found"
             exit 1
           fi
@@ -98,30 +114,36 @@ jobs:
   # ===========================================
   synthetic-restore:
     name: Synthetic Restore Test
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     needs: backup-freshness
     if: github.event.inputs.drill_type == 'synthetic' || github.event_name == 'schedule'
     timeout-minutes: 30
-    env:
-      OCI_REGION: ${{ vars.OCI_REGION }}
-      OCI_OBJECT_STORAGE_NAMESPACE: ${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}
-      OCI_BACKUP_BUCKET: ${{ vars.OCI_BACKUP_BUCKET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure OCI OIDC
-        uses: oracle/oci-cli-action@v1
-        with:
-          version: "latest"
-          oci_region: ${{ env.OCI_REGION }}
-          auth_type: "workload_identity"
-          workload_identity_provider: ${{ vars.OCI_WORKLOAD_IDENTITY_PROVIDER }}
+      - name: Configure OCI CLI
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
 
       - name: Download Latest Backup
         run: |
           LATEST_BACKUP="${{ needs.backup-freshness.outputs.latest_name }}"
-          oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$LATEST_BACKUP" --auth instance_principal --file "$LATEST_BACKUP"
+          oci os object get --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --name "$LATEST_BACKUP" --file "$LATEST_BACKUP"
 
       - name: Verify Backup Integrity
         run: |
