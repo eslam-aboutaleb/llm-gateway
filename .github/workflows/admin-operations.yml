@@ -124,8 +124,8 @@ jobs:
               fi
               ;;
             issue-key)
-              if [[ -z "${{ github.event.inputs.key_alias }}" || -z "${{ github.event.inputs.user_id }}" || -z "${{ github.event.inputs.team_id }}" || -z "${{ github.event.inputs.models }}" ]]; then
-                echo "key_alias, user_id, team_id, and models required for issue-key"
+              if [[ -z "${{ github.event.inputs.key_alias }}" || -z "${{ github.event.inputs.user_id }}" || -z "${{ github.event.inputs.models }}" ]]; then
+                echo "key_alias, user_id, and models required for issue-key"
                 exit 1
               fi
               ;;
@@ -137,182 +137,106 @@ jobs:
               ;;
           esac
 
-      - name: Execute admin operation
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const operation = '${{ github.event.inputs.operation }}';
-            const url = process.env.LITELLM_URL || 'http://localhost:4000';
-            const masterKey = process.env.LITELLM_MASTER_KEY;
-            
-            if (!masterKey) {
-              console.error('LITELLM_MASTER_KEY not set');
-              process.exit(1);
-            }
-
-            async function apiCall(method, endpoint, body = null) {
-              const response = await fetch(`${url}${endpoint}`, {
-                method,
-                headers: {
-                  'Authorization': `Bearer ${masterKey}`,
-                  'Content-Type': 'application/json',
-                },
-                body: body ? JSON.stringify(body) : undefined,
-              });
-              const text = await response.text();
-              return { status: response.status, data: text };
-            }
-
-            try {
-              switch (operation) {
-                case 'create-team': {
-                  const { team_alias, team_name, budget, budget_duration, rpm_limit, tpm_limit } = {
-                    team_alias: '${{ github.event.inputs.team_alias }}',
-                    team_name: '${{ github.event.inputs.team_name }}',
-                    budget: parseInt('${{ github.event.inputs.budget }}'),
-                    budget_duration: '${{ github.event.inputs.budget_duration }}',
-                    rpm_limit: parseInt('${{ github.event.inputs.rpm_limit }}'),
-                    tpm_limit: parseInt('${{ github.event.inputs.tpm_limit }}'),
-                  };
-                  
-                  const result = await apiCall('POST', '/team/new', {
-                    team_alias,
-                    team_name,
-                    max_budget: budget,
-                    budget_duration,
-                    rpm_limit,
-                    tpm_limit,
-                    max_parallel_requests: 10,
-                  });
-                  
-                  if (result.status === 200) {
-                    const data = JSON.parse(result.data);
-                    console.log('✓ Team created successfully');
-                    console.log('Team ID:', data.team_id);
-                    console.log('Team Alias:', team_alias);
-                  } else {
-                    console.error('Failed to create team:', result.status, result.data);
-                    process.exit(1);
-                  }
-                  break;
-                }
-                
-                case 'issue-key': {
-                  const { key_alias, user_id, team_id, models, key_budget, duration, key_rpm, key_tpm, parallel, metadata } = {
-                    key_alias: '${{ github.event.inputs.key_alias }}',
-                    user_id: '${{ github.event.inputs.user_id }}',
-                    team_id: '${{ github.event.inputs.team_id }}',
-                    models: '${{ github.event.inputs.models }}'.split(',').map(m => m.trim()),
-                    key_budget: parseInt('${{ github.event.inputs.key_budget }}'),
-                    duration: '${{ github.event.inputs.duration }}',
-                    key_rpm: parseInt('${{ github.event.inputs.key_rpm }}'),
-                    key_tpm: parseInt('${{ github.event.inputs.key_tpm }}'),
-                    parallel: parseInt('${{ github.event.inputs.parallel }}'),
-                    metadata: JSON.parse('${{ github.event.inputs.metadata }}'),
-                  };
-                  
-                  const result = await apiCall('POST', '/key/generate', {
-                    key_alias,
-                    user_id,
-                    team_id,
-                    models,
-                    max_budget: key_budget,
-                    budget_duration: '${{ github.event.inputs.duration }}',
-                    duration,
-                    rpm_limit: key_rpm,
-                    tpm_limit: key_tpm,
-                    max_parallel_requests: parallel,
-                    allowed_routes: ['llm_api_routes'],
-                    metadata,
-                  });
-                  
-                  if (result.status === 200) {
-                    const data = JSON.parse(result.data);
-                    console.log('✓ Key issued successfully');
-                    console.log('Key Alias:', key_alias);
-                    console.log('Key Name:', data.key_name);
-                    console.log('');
-                    console.log('=== KEY DETAILS (PRIVATE - DELIVER SECURELY) ===');
-                    console.log('Key Value:', data.key);
-                    console.log('');
-                    console.log('⚠️  DELIVER THIS KEY THROUGH APPROVED SECRET-SHARING CHANNEL ONLY');
-                    console.log('⚠️  DO NOT POST IN GITHUB, EMAIL, CHAT, OR LOGS');
-                  } else {
-                    console.error('Failed to issue key:', result.status, result.data);
-                    process.exit(1);
-                  }
-                  break;
-                }
-                
-                case 'revoke-key': {
-                  const key_identifier = '${{ github.event.inputs.key_identifier }}';
-                  
-                  // First, list keys to find the key_id
-                  const listResult = await apiCall('GET', '/key/list');
-                  if (listResult.status !== 200) {
-                    console.error('Failed to list keys:', listResult.status, listResult.data);
-                    process.exit(1);
-                  }
-                  
-                  const keys = JSON.parse(listResult.data).keys || [];
-                  const key = keys.find(k => k.key_alias === key_identifier || k.key_id === key_identifier);
-                  
-                  if (!key) {
-                    console.error('Key not found:', key_identifier);
-                    process.exit(1);
-                  }
-                  
-                  console.log('Found key:');
-                  console.log('  Key ID:', key.key_id);
-                  console.log('  Alias:', key.key_alias);
-                  console.log('  User:', key.user_id);
-                  console.log('  Team:', key.team_id);
-                  
-                  const revokeResult = await apiCall('POST', '/key/revoke', {
-                    key_id: key.key_id,
-                  });
-                  
-                  if (revokeResult.status === 200) {
-                    console.log('✓ Key revoked successfully');
-                    console.log('Key Alias:', key.key_alias);
-                    console.log('Key ID:', key.key_id);
-                  } else {
-                    console.error('Failed to revoke key:', revokeResult.status, revokeResult.data);
-                    process.exit(1);
-                  }
-                  break;
-                }
-                
-                case 'list-keys': {
-                  const result = await apiCall('GET', '/key/list');
-                  if (result.status === 200) {
-                    const data = JSON.parse(result.data);
-                    console.log('Keys:');
-                    console.log(JSON.stringify(data, null, 2));
-                  } else {
-                    console.error('Failed to list keys:', result.status, result.data);
-                    process.exit(1);
-                  }
-                  break;
-                }
-                
-                case 'list-teams': {
-                  const result = await apiCall('GET', '/team/list');
-                  if (result.status === 200) {
-                    const data = JSON.parse(result.data);
-                    console.log('Teams:');
-                    console.log(JSON.stringify(data, null, 2));
-                  } else {
-                    console.error('Failed to list teams:', result.status, result.data);
-                    process.exit(1);
-                  }
-                  break;
-                }
-              }
-            } catch (error) {
-              console.error('Error:', error);
-              process.exit(1);
-            }
+      - name: Execute Admin Operation via SSH
         env:
-          LITELLM_URL: ${{ env.LITELLM_URL }}
-          LITELLM_MASTER_KEY: ${{ env.LITELLM_MASTER_KEY }}
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          GATEWAY_PUBLIC_IP: ${{ vars.GATEWAY_PUBLIC_IP || '82.70.210.36' }}
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$GATEWAY_PUBLIC_IP" >> ~/.ssh/known_hosts 2>/dev/null
+
+          case "${{ github.event.inputs.operation }}" in
+            issue-key)
+              MODELS_JSON=$(echo "${{ github.event.inputs.models }}" | jq -R 'split(",") | map(gsub("^ +| +$";""))')
+              PAYLOAD=$(jq -n \
+                --arg ka "${{ github.event.inputs.key_alias }}" \
+                --arg uid "${{ github.event.inputs.user_id }}" \
+                --arg tid "${{ github.event.inputs.team_id }}" \
+                --arg dur "${{ github.event.inputs.duration }}" \
+                --argjson models "$MODELS_JSON" \
+                --argjson budget "${{ github.event.inputs.key_budget || 10 }}" \
+                --argjson rpm "${{ github.event.inputs.key_rpm || 20 }}" \
+                --argjson tpm "${{ github.event.inputs.key_tpm || 2000 }}" \
+                --argjson parallel "${{ github.event.inputs.parallel || 2 }}" \
+                '{
+                  key_alias: $ka,
+                  user_id: $uid,
+                  models: $models,
+                  max_budget: $budget,
+                  budget_duration: $dur,
+                  duration: $dur,
+                  rpm_limit: $rpm,
+                  tpm_limit: $tpm,
+                  max_parallel_requests: $parallel
+                } + (if $tid != "" then {team_id: $tid} else {} end)')
+
+              echo "Sending key generation request to LiteLLM..."
+              RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X POST http://127.0.0.1:4000/key/generate \
+                 -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" \
+                 -H \"Content-Type: application/json\" \
+                 -d '$PAYLOAD'")
+
+              KEY=$(echo "$RESPONSE" | jq -r '.key // empty')
+              if [ -n "$KEY" ]; then
+                echo "=========================================================="
+                echo "✓ VIRTUAL KEY ISSUED SUCCESSFULLY"
+                echo "=========================================================="
+                echo "User ID:    ${{ github.event.inputs.user_id }}"
+                echo "Key Alias:  ${{ github.event.inputs.key_alias }}"
+                echo "Key Name:   $(echo "$RESPONSE" | jq -r '.key_name // "N/A"')"
+                echo "Max Budget: \$${{ github.event.inputs.key_budget || 10 }}"
+                echo "Duration:   ${{ github.event.inputs.duration }}"
+                echo "Models:     ${{ github.event.inputs.models }}"
+                echo ""
+                echo "VIRTUAL API KEY: $KEY"
+                echo "=========================================================="
+                echo "⚠️  Deliver this key to the user securely. It will not be shown again."
+              else
+                echo "✗ Failed to generate key. LiteLLM response:"
+                echo "$RESPONSE"
+                exit 1
+              fi
+              ;;
+
+            list-keys)
+              ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X GET http://127.0.0.1:4000/key/list -H \"Authorization: Bearer $LITELLM_MASTER_KEY\"" | jq .
+              ;;
+
+            revoke-key)
+              KEY_IDENTIFIER="${{ github.event.inputs.key_identifier }}"
+              KEYS_JSON=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X GET http://127.0.0.1:4000/key/list -H \"Authorization: Bearer $LITELLM_MASTER_KEY\"")
+              KEY_ID=$(echo "$KEYS_JSON" | jq -r --arg id "$KEY_IDENTIFIER" '.keys[] | select(.key_alias == $id or .key_id == $id) | .key_id' | head -n1)
+              if [ -z "$KEY_ID" ]; then
+                echo "✗ Key not found matching identifier: $KEY_IDENTIFIER"
+                exit 1
+              fi
+              echo "Revoking key $KEY_ID ($KEY_IDENTIFIER)..."
+              ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X POST http://127.0.0.1:4000/key/revoke -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" -H \"Content-Type: application/json\" -d '{\"key_id\": \"$KEY_ID\"}'" | jq .
+              echo "✓ Key revoked successfully."
+              ;;
+
+            create-team)
+              PAYLOAD=$(jq -n \
+                --arg ta "${{ github.event.inputs.team_alias }}" \
+                --arg tn "${{ github.event.inputs.team_name }}" \
+                --arg dur "${{ github.event.inputs.budget_duration }}" \
+                --argjson budget "${{ github.event.inputs.budget }}" \
+                --argjson rpm "${{ github.event.inputs.rpm_limit }}" \
+                --argjson tpm "${{ github.event.inputs.tpm_limit }}" \
+                '{team_alias: $ta, team_name: $tn, max_budget: $budget, budget_duration: $dur, rpm_limit: $rpm, tpm_limit: $tpm}')
+              ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X POST http://127.0.0.1:4000/team/new -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" -H \"Content-Type: application/json\" -d '$PAYLOAD'" | jq .
+              ;;
+
+            list-teams)
+              ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X GET http://127.0.0.1:4000/team/list -H \"Authorization: Bearer $LITELLM_MASTER_KEY\"" | jq .
+              ;;
+          esac
