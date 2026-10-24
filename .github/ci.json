@@ -1,0 +1,45 @@
+{
+  "$schema": "https://raw.githubusercontent.com/eslam-aboutaleb/ci-workflows/main/.github/ci.schema.json",
+  "version": 1,
+  "compose": {
+    "gateway": {
+      "platforms": "linux/arm64"
+    }
+  },
+  "security": {
+    "enable-gitleaks": true
+  },
+  "contracts": [
+    {
+      "kind": "quality",
+      "project-dir": ".",
+      "target": "ci-quality"
+    },
+    {
+      "kind": "docs",
+      "project-dir": ".",
+      "target": "ci-docs",
+      "paths": [
+        "README.md",
+        "docs/**"
+      ]
+    },
+    {
+      "kind": "docs",
+      "project-dir": ".",
+      "target": "ci-docs-links",
+      "paths": [
+        "README.md",
+        "docs/**"
+      ]
+    },
+    {
+      "kind": "generated",
+      "project-dir": ".",
+      "target": "ci-generated",
+      "paths": [
+        "infrastructure/**"
+      ]
+    }
+  ]
+}

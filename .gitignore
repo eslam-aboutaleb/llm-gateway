@@ -1,0 +1,62 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+
+# Terramate
+.terramate/
+
+# Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+.env
+.env.local
+.env.*.local
+secrets/
+*.age
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+coverage/
+*.profraw
+
+# Backup artifacts
+backups/
+*.dump
+*.sql
+!gateway/postgres/init/*.sql
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# CI artifacts
+.github/workflows/*.yml.bak

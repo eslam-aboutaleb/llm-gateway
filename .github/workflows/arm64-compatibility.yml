@@ -1,0 +1,167 @@
+# ARM64 Compatibility & Image Verification Workflow
+# Replaces: check-arm64.sh, verify-images.sh
+# Runs on PR affecting images, release bump, weekly
+
+name: ARM64 Compatibility & Image Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gateway/compose.yaml'
+      - 'gateway/compose.prod.yaml'
+      - '.github/workflows/arm64-compatibility.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'gateway/compose.yaml'
+      - 'gateway/compose.prod.yaml'
+  schedule:
+    - cron: '0 4 * * 1'  # Weekly Monday 4 AM
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  arm64-compatibility:
+    name: ARM64 Native Compatibility
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract image references from compose files
+        id: images
+        run: |
+          IMAGES=$(grep -h "image:" gateway/compose.yaml gateway/compose.prod.yaml | \
+            sed -E 's/.*image:\s*//' | \
+            sed -E 's/@sha256:.*//' | \
+            sort -u | \
+            grep -v "\\\${" | \
+            tr '\n' ' ')
+          echo "images=$IMAGES" >> "$GITHUB_OUTPUT"
+
+      - name: Check ARM64 manifests for each image
+        run: |
+          for IMAGE in ${{ steps.images.outputs.images }}; do
+            echo "Checking: $IMAGE"
+            MANIFEST_OUTPUT=$(docker buildx imagetools inspect "$IMAGE" 2>/dev/null || true)
+
+            if echo "$MANIFEST_OUTPUT" | grep -q "linux/arm64"; then
+              DIGEST=$(echo "$MANIFEST_OUTPUT" | grep "^Digest:" | awk '{print $2}' | head -1)
+              echo "  ✓ linux/arm64 supported"
+              if [[ -n "$DIGEST" ]]; then
+                echo "    Digest: $DIGEST"
+              fi
+            else
+              echo "  ✗ linux/arm64 NOT supported"
+              echo "$MANIFEST_OUTPUT" | grep "Platform:" | head -10
+              exit 1
+            fi
+            echo ""
+          done
+
+      - name: Verify image signatures (LiteLLM)
+        if: env.LITELLM_COSIGN_KEY != ''
+        env:
+          LITELLM_COSIGN_KEY: ${{ secrets.LITELLM_COSIGN_KEY }}
+        run: |
+          LITELLM_IMAGE=$(grep "image:" gateway/compose.yaml | head -1 | sed -E 's/.*image:\s*//')
+          echo "Verifying signature for: $LITELLM_IMAGE"
+          if cosign verify "$LITELLM_IMAGE" --key "$LITELLM_COSIGN_KEY" 2>/dev/null; then
+            echo "  ✓ Signature verified"
+          else
+            echo "  ✗ Signature verification failed"
+            exit 1
+          fi
+
+  image-verification:
+    name: Image Verification (Digests, SBOM, Vulnerabilities)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract image references from compose files
+        id: images
+        run: |
+          IMAGES=$(grep -h "image:" gateway/compose.yaml gateway/compose.prod.yaml | \
+            sed -E 's/.*image:\s*//' | \
+            sed -E 's/@sha256:.*//' | \
+            sort -u | \
+            grep -v "\\\${" | \
+            tr '\n' ' ')
+          PRIMARY_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
+          echo "images=$IMAGES" >> "$GITHUB_OUTPUT"
+          echo "primary_image=$PRIMARY_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Syft (SBOM)
+        uses: anchore/sbom-action@v0
+        with:
+          path: gateway/
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Setup Grype (Vulnerability Scan)
+        uses: anchore/grype-action@v1
+        with:
+          image: ${{ steps.images.outputs.primary_image }}
+          fail-on-severity: high
+          output-format: sarif
+          output-file: grype.sarif
+
+      - name: Verify digests and architectures
+        run: |
+          FAILED=0
+          for IMAGE in ${{ steps.images.outputs.images }}; do
+            echo "Verifying: $IMAGE"
+            MANIFEST_OUTPUT=$(docker buildx imagetools inspect "$IMAGE" 2>/dev/null || true)
+
+            DIGEST=$(echo "$MANIFEST_OUTPUT" | grep "^Digest:" | awk '{print $2}' | head -1)
+            if [[ -n "$DIGEST" ]]; then
+              echo "  Digest: $DIGEST"
+            else
+              echo "  ⚠ Could not get digest"
+            fi
+
+            ARCHS=$(echo "$MANIFEST_OUTPUT" | grep "Platform:" | awk '{print $2}' | sort -u | tr '\n' ' ')
+            if [[ -n "$ARCHS" ]]; then
+              echo "  Architectures: $ARCHS"
+            fi
+
+            # Check for arm64
+            if ! echo "$MANIFEST_OUTPUT" | grep -q "linux/arm64"; then
+              echo "  ✗ linux/arm64 NOT supported"
+              ((FAILED++))
+            fi
+            echo ""
+          done
+
+          if [[ $FAILED -gt 0 ]]; then
+            echo "$FAILED image(s) do not support linux/arm64"
+            exit 1
+          fi
+
+      - name: Upload SBOM
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: sbom.spdx.json
+          category: sbom
+
+      - name: Upload Grype SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: grype.sarif
+          category: grype

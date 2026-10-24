@@ -1,0 +1,387 @@
+#cloud-config
+# llm-gateway cloud-init configuration
+# This template is rendered by Terraform and passed to the OCI instance
+
+# ===========================================
+# System Updates and Packages
+# ===========================================
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - age
+  - jq
+  - curl
+  - gnupg2
+  - software-properties-common
+  - apt-transport-https
+  - ca-certificates
+  - unattended-upgrades
+  - fail2ban
+  - ufw
+  - htop
+  - iotop
+  - sysstat
+
+# ===========================================
+# SSH Hardening
+# ===========================================
+ssh_pwauth: false
+disable_root: true
+ssh_authorized_keys:
+  - ${oci_ssh_public_key}
+
+# ===========================================
+# Timezone and NTP
+# ===========================================
+timezone: UTC
+ntp:
+  enabled: true
+  servers:
+    - 0.ubuntu.pool.ntp.org
+    - 1.ubuntu.pool.ntp.org
+    - 2.ubuntu.pool.ntp.org
+    - 3.ubuntu.pool.ntp.org
+
+# ===========================================
+# Configuration Files (Single write_files list)
+# ===========================================
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # SSH Hardening for llm-gateway
+      PermitRootLogin no
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      AuthorizedKeysFile .ssh/authorized_keys
+      PermitEmptyPasswords no
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      X11Forwarding no
+      AllowAgentForwarding no
+      AllowTcpForwarding no
+      PermitTunnel no
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+      MaxAuthTries 3
+      MaxSessions 2
+      LoginGraceTime 30
+      Banner /etc/issue.net
+
+  - path: /etc/issue.net
+    owner: root:root
+    permissions: '0644'
+    content: |
+      **********************************************************************
+      *                    AUTHORIZED ACCESS ONLY                          *
+      *                                                                  *
+      * This system is for authorized users only. All activity is        *
+      * monitored and logged. Unauthorized access will be prosecuted.    *
+      **********************************************************************
+
+  - path: /etc/fail2ban/jail.d/sshd.local
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [sshd]
+      enabled = true
+      port = ssh
+      filter = sshd
+      logpath = /var/log/auth.log
+      maxretry = 3
+      bantime = 3600
+      findtime = 600
+      backend = systemd
+
+  - path: /etc/apt/apt.conf.d/50unattended-upgrades
+    owner: root:root
+    permissions: '0644'
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+      };
+      Unattended-Upgrade::Package-Blacklist {
+        "docker-ce";
+        "docker-ce-cli";
+        "containerd.io";
+        "docker-compose-plugin";
+        "docker-buildx-plugin";
+      };
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::MinimalSteps "true";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+      Unattended-Upgrade::SyslogEnable "true";
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: '0644'
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  - path: /etc/sysctl.d/99-llm-gateway.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Network tuning
+      net.core.somaxconn = 65535
+      net.core.netdev_max_backlog = 5000
+      net.ipv4.tcp_max_syn_backlog = 65535
+      net.ipv4.tcp_fin_timeout = 15
+      net.ipv4.tcp_keepalive_time = 300
+      net.ipv4.tcp_keepalive_intvl = 30
+      net.ipv4.tcp_keepalive_probes = 5
+
+      # File system
+      fs.file-max = 1000000
+      fs.inotify.max_user_instances = 8192
+      fs.inotify.max_user_watches = 524288
+
+      # Memory
+      vm.swappiness = 10
+      vm.dirty_ratio = 15
+      vm.dirty_background_ratio = 5
+
+  - path: /etc/security/limits.d/99-llm-gateway.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Increase limits for Docker containers
+      * soft nofile 64000
+      * hard nofile 64000
+      * soft nproc 4096
+      * hard nproc 4096
+      root soft nofile 64000
+      root hard nofile 64000
+      root soft nproc 4096
+      root hard nproc 4096
+
+  - path: /etc/systemd/system/llm-gateway.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=LLM Gateway Docker Compose Stack
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/llm-gateway/compose
+      User=llm-gateway
+      Group=llm-gateway
+      Environment=COMPOSE_PROJECT_NAME=llm-gateway
+      # Start
+      ExecStartPre=/usr/bin/docker compose -f compose.yaml -f compose.prod.yaml config --quiet
+      ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.prod.yaml up -d --remove-orphans
+      # Stop
+      ExecStop=/usr/bin/docker compose -f compose.yaml -f compose.prod.yaml down --remove-orphans
+      # Reload
+      ExecReload=/usr/bin/docker compose -f compose.yaml -f compose.prod.yaml up -d --remove-orphans --force-recreate
+      TimeoutStartSec=300
+      TimeoutStopSec=120
+
+      # Resource limits
+      MemoryLimit=10G
+      CPUQuota=180%
+      TasksMax=4096
+      LimitNOFILE=64000
+      LimitNPROC=4096
+
+      # Security
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectSystem=strict
+      ProtectHome=true
+      ReadWritePaths=/opt/llm-gateway
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectControlGroups=true
+      RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+      RestrictNamespaces=true
+      LockPersonality=true
+      MemoryDenyWriteExecute=true
+      RestrictRealtime=true
+      RestrictSUIDSGID=true
+
+      # Restart policy
+      Restart=on-failure
+      RestartSec=30
+      StartLimitIntervalSec=600
+      StartLimitBurst=3
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/gateway-backup
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      if [[ -f "/opt/llm-gateway/config/backup.env" ]]; then
+        source /opt/llm-gateway/config/backup.env
+      fi
+      BACKUP_DIR="/opt/llm-gateway/backups"
+      mkdir -p "$BACKUP_DIR"
+      TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+      BACKUP_FILE="$BACKUP_DIR/litellm-$TIMESTAMP.dump"
+      ENCRYPTED_FILE="$BACKUP_FILE.age"
+      docker exec llm-gateway-postgres pg_dump -U litellm -d litellm --format=custom --no-owner --no-privileges --compress=6 -f "/tmp/backup.dump"
+      docker cp llm-gateway-postgres:/tmp/backup.dump "$BACKUP_FILE"
+      docker exec llm-gateway-postgres rm -f /tmp/backup.dump
+      if [[ -n "$${BACKUP_AGE_PUBLIC_KEY:-}" ]]; then
+        age -r "$BACKUP_AGE_PUBLIC_KEY" -o "$ENCRYPTED_FILE" "$BACKUP_FILE"
+        rm -f "$BACKUP_FILE"
+        TARGET_FILE="$ENCRYPTED_FILE"
+      else
+        TARGET_FILE="$BACKUP_FILE"
+      fi
+      if command -v oci &> /dev/null && [[ -n "$${OCI_BACKUP_BUCKET:-}" && -n "$${OCI_OBJECT_STORAGE_NAMESPACE:-}" ]]; then
+        oci os object put --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --file "$TARGET_FILE" --name "$(basename "$TARGET_FILE")" --auth instance_principal
+      fi
+
+  - path: /etc/systemd/system/llm-gateway-backup.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=LLM Gateway PostgreSQL Backup
+      Requires=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      User=root
+      EnvironmentFile=-/opt/llm-gateway/config/backup.env
+      ExecStart=/usr/local/bin/gateway-backup
+      TimeoutSec=600
+
+      # Security
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectSystem=strict
+      ProtectHome=true
+      ReadWritePaths=/opt/llm-gateway/backups
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectControlGroups=true
+
+  - path: /etc/systemd/system/llm-gateway-backup.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Daily LLM Gateway Backup
+
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/logrotate.d/llm-gateway
+    owner: root:root
+    permissions: '0644'
+    content: |
+      /opt/llm-gateway/logs/*.log {
+        daily
+        missingok
+        rotate 14
+        compress
+        delaycompress
+        notifempty
+        create 0640 llm-gateway llm-gateway
+        sharedscripts
+        postrotate
+          systemctl reload llm-gateway > /dev/null 2>&1 || true
+        endscript
+      }
+
+# ===========================================
+# Provisioning Commands (Single runcmd list)
+# ===========================================
+runcmd:
+  # Install Docker Engine (pinned)
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=arm64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce=5:27.1.1-1~ubuntu.24.04~noble docker-ce-cli=5:27.1.1-1~ubuntu.24.04~noble containerd.io=1.7.22-1 docker-compose-plugin=2.29.2-1~ubuntu.24.04~noble docker-buildx-plugin=0.16.2-1~ubuntu.24.04~noble
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Configure Docker daemon
+  - mkdir -p /etc/docker
+  - |
+    cat > /etc/docker/daemon.json <<'EOF'
+    {
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+      },
+      "storage-driver": "overlay2",
+      "default-ulimits": {
+        "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 },
+        "nproc": { "Name": "nproc", "Hard": 4096, "Soft": 2048 }
+      },
+      "live-restore": true,
+      "userland-proxy": false
+    }
+    EOF
+  - systemctl restart docker
+
+  # Create service user for Compose
+  - useradd -r -s /bin/false -d /opt/llm-gateway llm-gateway
+  - usermod -aG docker llm-gateway
+
+  # Firewall (UFW) - Defense in depth with NSG
+  - ufw --force reset
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment 'SSH from admin CIDR'
+  - ufw allow 80/tcp comment 'HTTP for ACME'
+  - ufw allow 443/tcp comment 'HTTPS for API'
+  - ufw --force enable
+  - systemctl enable ufw
+
+  # Fail2ban for SSH protection
+  - systemctl enable fail2ban
+  - systemctl restart fail2ban
+
+  # Create application directories
+  - mkdir -p /opt/llm-gateway/{config,compose,caddy,postgres,redis,backups,logs}
+  - chown -R llm-gateway:llm-gateway /opt/llm-gateway
+  - chmod 750 /opt/llm-gateway
+  - chmod 750 /opt/llm-gateway/backups
+
+  # Enable systemd units
+  - systemctl daemon-reload
+  - systemctl enable llm-gateway.service
+  - systemctl enable llm-gateway-backup.timer
+  - systemctl start llm-gateway-backup.timer
+
+  # OCI Monitoring Agent (optional)
+  - bash -c 'curl -sL https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/install-monitoring-agent.sh | bash' || true
+
+# ===========================================
+# Final setup
+# ===========================================
+final_message: |
+  llm-gateway cloud-init completed successfully.
+  Instance ready for Compose deployment.
+  System will reboot if kernel updates were applied.

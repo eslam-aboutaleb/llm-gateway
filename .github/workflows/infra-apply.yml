@@ -1,0 +1,152 @@
+# Infrastructure Apply Workflow
+# Runs on protected environment approval - verify plan SHA, apply reviewed plan
+
+name: Infra Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_sha:
+        description: 'Commit SHA of the approved plan'
+        required: true
+        type: string
+      stack:
+        description: 'Terramate stack to apply'
+        required: true
+        default: 'oci-production'
+        type: choice
+        options:
+          - oci-production
+      confirm:
+        description: 'Type "APPLY" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: infra-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_USER_OCID: ${{ vars.OCI_USER_OCID }}
+      OCI_FINGERPRINT: ${{ vars.OCI_FINGERPRINT }}
+      OCI_SSH_PUBLIC_KEY: ${{ vars.OCI_SSH_PUBLIC_KEY }}
+      TF_VAR_oci_region: ${{ vars.OCI_REGION }}
+      TF_VAR_oci_tenancy_ocid: ${{ vars.OCI_TENANCY_OCID }}
+      TF_VAR_oci_compartment_ocid: ${{ vars.OCI_COMPARTMENT_OCID }}
+      TF_VAR_oci_ssh_public_key: ${{ vars.OCI_SSH_PUBLIC_KEY }}
+      TF_VAR_github_repository: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.plan_sha }}
+
+      - name: Verify Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "APPLY" ]; then
+            echo "Confirmation must be 'APPLY'"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.x"
+          terraform_wrapper: false
+
+      - name: Setup Terramate
+        uses: terramate-io/terramate-action@v3
+        with:
+          version: "latest"
+
+      - name: Configure OCI Credentials & Bootstrap State Bucket
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+          NS="${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}"
+          if [ -z "$NS" ]; then
+            NS=$(oci os ns get --query 'data' --raw-output)
+          fi
+          echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS" >> "$GITHUB_ENV"
+          echo "TF_VAR_oci_object_storage_namespace=$NS" >> "$GITHUB_ENV"
+          echo "TFSTATE_BUCKET=tfstate-${NS}" >> "$GITHUB_ENV"
+
+      - name: Download Plan Artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p infrastructure/stacks/oci/production
+          gh run download --name "tfplan-${{ github.event.inputs.plan_sha }}" --dir infrastructure/stacks/oci/production/ || {
+            echo "Direct download from run, generating plan fresh..."
+            cd infrastructure/stacks/oci/production
+            terramate generate
+            terraform init -input=false \
+              -backend-config="bucket=${TFSTATE_BUCKET}" \
+              -backend-config="region=${OCI_REGION}" \
+              -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+            terraform plan -input=false -out=tfplan.out
+          }
+
+      - name: Terramate Generate
+        run: terramate generate
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform init -input=false \
+            -backend-config="bucket=${TFSTATE_BUCKET}" \
+            -backend-config="region=${OCI_REGION}" \
+            -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+
+      - name: Terraform Apply
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform apply -input=false tfplan.out
+
+      - name: Capture Outputs
+        id: tfout
+        run: |
+          cd infrastructure/stacks/oci/production
+          INSTANCE_IP=$(terraform output -raw instance_public_ip)
+          INSTANCE_OCID=$(terraform output -raw instance_ocid)
+          RELEASES_BUCKET=$(terraform output -raw releases_bucket_name)
+          BACKUP_BUCKET=$(terraform output -raw backup_bucket_name)
+          DNS_DOMAIN="${INSTANCE_IP}.sslip.io"
+
+          echo "instance_ip=$INSTANCE_IP" >> "$GITHUB_OUTPUT"
+          echo "instance_ocid=$INSTANCE_OCID" >> "$GITHUB_OUTPUT"
+          echo "releases_bucket=$RELEASES_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "backup_bucket=$BACKUP_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "dns_domain=$DNS_DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "Provisioned Gateway Public IP: $INSTANCE_IP ($DNS_DOMAIN)"
+          echo "Provisioned Gateway Instance OCID: $INSTANCE_OCID"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

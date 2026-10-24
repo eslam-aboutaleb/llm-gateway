@@ -1,0 +1,22 @@
+# CODEOWNERS for llm-gateway
+# These owners will be requested for review when matching files change
+
+# Global ownership
+* @eslam-aboutaleb
+
+# Infrastructure - Terraform/Terramate
+/infrastructure/ @eslam-aboutaleb
+
+# Cloud-init and VM bootstrap
+/cloud-init/ @eslam-aboutaleb
+
+# Gateway configuration (LiteLLM, Caddy, Compose)
+/gateway/ @eslam-aboutaleb
+
+# CI/CD workflows
+/.github/workflows/ @eslam-aboutaleb
+
+# Security-sensitive: require admin review
+/infrastructure/bootstrap/ @eslam-aboutaleb
+/infrastructure/modules/identity/ @eslam-aboutaleb
+/gateway/config/ @eslam-aboutaleb

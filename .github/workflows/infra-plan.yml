@@ -1,0 +1,153 @@
+# Infrastructure Plan Workflow
+# Runs on trusted PR / manual - remote-state Terraform plan
+
+name: Infra Plan
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'infrastructure/**'
+      - 'cloud-init/**'
+      - '.github/workflows/infra-plan.yml'
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Terramate stack to plan'
+        required: true
+        default: 'oci-production'
+        type: choice
+        options:
+          - oci-production
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: infra-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.repository == github.event.pull_request.head.repo.full_name
+    timeout-minutes: 30
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_USER_OCID: ${{ vars.OCI_USER_OCID }}
+      OCI_FINGERPRINT: ${{ vars.OCI_FINGERPRINT }}
+      OCI_SSH_PUBLIC_KEY: ${{ vars.OCI_SSH_PUBLIC_KEY }}
+      TF_VAR_oci_region: ${{ vars.OCI_REGION }}
+      TF_VAR_oci_tenancy_ocid: ${{ vars.OCI_TENANCY_OCID }}
+      TF_VAR_oci_compartment_ocid: ${{ vars.OCI_COMPARTMENT_OCID }}
+      TF_VAR_oci_ssh_public_key: ${{ vars.OCI_SSH_PUBLIC_KEY }}
+      TF_VAR_github_repository: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.x"
+          terraform_wrapper: false
+
+      - name: Setup Terramate
+        uses: terramate-io/terramate-action@v3
+        with:
+          version: "latest"
+
+      - name: Configure OCI Credentials & Bootstrap State Bucket
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+          NS="${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}"
+          if [ -z "$NS" ]; then
+            NS=$(oci os ns get --query 'data' --raw-output)
+          fi
+          echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS" >> "$GITHUB_ENV"
+          echo "TF_VAR_oci_object_storage_namespace=$NS" >> "$GITHUB_ENV"
+
+          BUCKET="tfstate-${NS}"
+          echo "TFSTATE_BUCKET=$BUCKET" >> "$GITHUB_ENV"
+          if ! oci os bucket get --namespace-name "$NS" --bucket-name "$BUCKET" >/dev/null 2>&1; then
+            echo "Creating Terraform state bucket: $BUCKET"
+            oci os bucket create \
+              --compartment-id "$OCI_COMPARTMENT_OCID" \
+              --namespace-name "$NS" \
+              --name "$BUCKET" \
+              --versioning Enabled \
+              --public-access-type NoPublicAccess
+          fi
+
+      - name: Terramate Generate
+        run: terramate generate
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform init -input=false \
+            -backend-config="bucket=${TFSTATE_BUCKET}" \
+            -backend-config="region=${OCI_REGION}" \
+            -backend-config="namespace=${OCI_OBJECT_STORAGE_NAMESPACE}"
+
+      - name: Terraform Plan
+        id: tfplan
+        run: |
+          cd infrastructure/stacks/oci/production
+          terraform plan -input=false -out=tfplan.out
+          terraform show -json tfplan.out > tfplan.json
+
+      - name: Generate Plan Summary
+        id: summary
+        run: |
+          cd infrastructure/stacks/oci/production
+          cat > plan-summary.md <<'EOF'
+          # Terraform Plan Summary
+          **Stack:** oci-production
+          **Commit:** ${{ github.sha }}
+          **Branch:** ${{ github.ref_name }}
+          **Triggered by:** ${{ github.actor }}
+
+          ## Plan Output
+          EOF
+          terraform show -no-color tfplan.out >> plan-summary.md
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: |
+            infrastructure/stacks/oci/production/tfplan.out
+            infrastructure/stacks/oci/production/tfplan.json
+            infrastructure/stacks/oci/production/plan-summary.md
+          retention-days: 7
+
+      - name: Save Plan SHA for Apply
+        id: plan_sha
+        run: |
+          echo "PLAN_SHA=${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "PLAN_SHA=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      plan_sha: ${{ steps.plan_sha.outputs.PLAN_SHA }}

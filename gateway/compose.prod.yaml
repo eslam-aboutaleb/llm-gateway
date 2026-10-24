@@ -1,0 +1,96 @@
+# Docker Compose Production Override
+# Extends compose.yaml with production-specific settings
+
+services:
+  # ===========================================
+  # PostgreSQL - Production Overrides
+  # ===========================================
+  postgres:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 3G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ===========================================
+  # Redis - Production Overrides
+  # ===========================================
+  redis:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+
+  # ===========================================
+  # LiteLLM - Production Overrides
+  # ===========================================
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.46.1@sha256:622532490d9161c51db67d0bc4027bdd35aaf8c0aef091647765b6fdd78b3d48
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 6G
+        reservations:
+          cpus: '1.0'
+          memory: 4G
+    environment:
+      # Production settings
+      - LITELLM_LOG=WARNING
+      - NUM_WORKERS=1
+      - UVICORN_WORKERS=1
+      - REQUEST_TIMEOUT=600
+      - MAX_REQUEST_SIZE_MB=100
+
+  # ===========================================
+  # Caddy - Production Overrides
+  # ===========================================
+  caddy:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
+
+# ===========================================
+# Networks (inherited)
+# ===========================================
+networks:
+  llm-gateway-internal:
+    external: false
+  llm-gateway-caddy:
+    external: false
+
+# ===========================================
+# Volumes (inherited)
+# ===========================================
+volumes:
+  postgres_data:
+    external: false
+  redis_data:
+    external: false
+  caddy_data:
+    external: false
+  caddy_config:
+    external: false
+
+# ===========================================
+# Secrets (inherited)
+# ===========================================
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt

@@ -1,0 +1,316 @@
+# Deploy Workflow
+# Runs on approved release - deploys compose/config/secrets to Gateway VM over SSH and runs smoke tests
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Operation to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - rollback
+      release_tag:
+        description: 'Release tag to deploy or rollback to (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+        type: string
+      skip_backup:
+        description: 'Skip pre-deployment backup'
+        required: false
+        default: false
+        type: boolean
+      confirm:
+        description: 'Type "DEPLOY" or "ROLLBACK" to confirm'
+        required: true
+        default: 'DEPLOY'
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Release
+    if: github.event.inputs.operation == 'deploy' || github.event.inputs.operation == ''
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_USER_OCID: ${{ vars.OCI_USER_OCID }}
+      OCI_FINGERPRINT: ${{ vars.OCI_FINGERPRINT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DEPLOY" ]; then
+            echo "Confirmation must be 'DEPLOY'"
+            exit 1
+          fi
+
+      - name: Resolve Gateway Instance IP & Domain
+        env:
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+        run: |
+          pip install --quiet oci-cli
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+          NS="${{ vars.OCI_OBJECT_STORAGE_NAMESPACE }}"
+          if [ -z "$NS" ]; then
+            NS=$(oci os ns get --query 'data' --raw-output)
+          fi
+          echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS" >> "$GITHUB_ENV"
+
+          INSTANCE_IP="${{ vars.GATEWAY_PUBLIC_IP }}"
+          if [ -z "$INSTANCE_IP" ]; then
+            INSTANCE_OCID=$(oci compute instance list --compartment-id "$OCI_COMPARTMENT_OCID" --display-name "llm-gateway-gateway" --lifecycle-state RUNNING --query 'data[0].id' --raw-output)
+            INSTANCE_IP=$(oci compute instance list-vnics --instance-id "$INSTANCE_OCID" --query 'data[0]."public-ip"' --raw-output)
+          fi
+          DNS_DOMAIN="${{ vars.GATEWAY_DNS_DOMAIN }}"
+          if [ -z "$DNS_DOMAIN" ]; then
+            DNS_DOMAIN="${INSTANCE_IP}.sslip.io"
+          fi
+          echo "GATEWAY_PUBLIC_IP=$INSTANCE_IP" >> "$GITHUB_ENV"
+          echo "GATEWAY_DNS_DOMAIN=$DNS_DOMAIN" >> "$GITHUB_ENV"
+          echo "Resolved Gateway IP: $INSTANCE_IP ($DNS_DOMAIN)"
+
+      - name: Deploy Gateway Configuration & Start Services via SSH
+        env:
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+          LITELLM_SALT_KEY: ${{ secrets.LITELLM_SALT_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          LITELLM_UI_PASSWORD: ${{ secrets.LITELLM_UI_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$GATEWAY_PUBLIC_IP" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Wait for cloud-init and Docker to be ready on the VM
+          for i in {1..30}; do
+            if ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "sudo systemctl start docker && sudo docker info >/dev/null 2>&1 && sudo test -d /opt/llm-gateway"; then
+              echo "Gateway VM and Docker daemon are ready!"
+              break
+            fi
+            echo "Waiting for cloud-init / Docker installation on VM (attempt $i/30)..."
+            sleep 15
+          done
+
+          cat > gateway.env <<EOF
+          GATEWAY_DNS_DOMAIN=${GATEWAY_DNS_DOMAIN}
+          ACME_EMAIL=${ACME_EMAIL}
+          LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+          LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+          POSTGRES_USER=litellm
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=litellm
+          REDIS_PASSWORD=${REDIS_PASSWORD}
+          DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
+          REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+          LITELLM_UI_USERNAME=admin
+          LITELLM_UI_PASSWORD=${LITELLM_UI_PASSWORD}
+          OPENAI_API_KEY=${OPENAI_API_KEY}
+          BACKUP_BUCKET_NAMESPACE=${OCI_OBJECT_STORAGE_NAMESPACE}
+          BACKUP_BUCKET_NAME=backups-${OCI_OBJECT_STORAGE_NAMESPACE}
+          EOF
+
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            gateway.env \
+            gateway/compose.yaml \
+            gateway/compose.prod.yaml \
+            gateway/caddy/Caddyfile \
+            gateway/config/litellm.yaml \
+            gateway/config/model-catalog.yaml \
+            ubuntu@"$GATEWAY_PUBLIC_IP":/tmp/
+
+          scp -r -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+            gateway/postgres \
+            ubuntu@"$GATEWAY_PUBLIC_IP":/tmp/
+
+          rm -f gateway.env
+
+          cat > /tmp/deploy_remote.sh <<'EOF'
+          set -euo pipefail
+          RELEASE_TAG="$1"
+          RELEASE_DIR="/opt/llm-gateway/releases/$RELEASE_TAG"
+          mkdir -p "$RELEASE_DIR/caddy" "$RELEASE_DIR/config" "$RELEASE_DIR/postgres" /opt/llm-gateway/compose /opt/llm-gateway/caddy /opt/llm-gateway/config /etc/llm-gateway
+
+          mv /tmp/gateway.env /etc/llm-gateway/gateway.env
+          chmod 600 /etc/llm-gateway/gateway.env
+
+          set -a
+          source /etc/llm-gateway/gateway.env
+          set +a
+
+          mkdir -p /opt/llm-gateway/compose/secrets "$RELEASE_DIR/secrets"
+          printf '%s' "$POSTGRES_PASSWORD" > /opt/llm-gateway/compose/secrets/postgres_password.txt
+          chmod 600 /opt/llm-gateway/compose/secrets/postgres_password.txt
+          cp /opt/llm-gateway/compose/secrets/postgres_password.txt "$RELEASE_DIR/secrets/"
+
+          cp /tmp/compose.yaml /tmp/compose.prod.yaml "$RELEASE_DIR/"
+          cp /tmp/Caddyfile "$RELEASE_DIR/caddy/Caddyfile"
+          cp /tmp/litellm.yaml /tmp/model-catalog.yaml "$RELEASE_DIR/config/"
+          if [ -d /tmp/postgres ]; then
+            cp -r /tmp/postgres "$RELEASE_DIR/"
+            cp -r /tmp/postgres /opt/llm-gateway/compose/
+            rm -rf /tmp/postgres
+          fi
+
+          rm -rf /opt/llm-gateway/compose/caddy /opt/llm-gateway/compose/config
+          mkdir -p /opt/llm-gateway/compose/caddy /opt/llm-gateway/compose/config /opt/llm-gateway/caddy /opt/llm-gateway/config
+          cp "$RELEASE_DIR"/compose*.yaml /opt/llm-gateway/compose/
+          cp "$RELEASE_DIR"/caddy/Caddyfile /opt/llm-gateway/compose/caddy/Caddyfile
+          cp "$RELEASE_DIR"/caddy/Caddyfile /opt/llm-gateway/caddy/Caddyfile
+          cp "$RELEASE_DIR"/config/*.yaml /opt/llm-gateway/compose/config/
+          cp "$RELEASE_DIR"/config/*.yaml /opt/llm-gateway/config/
+          cp /etc/llm-gateway/gateway.env /opt/llm-gateway/compose/.env
+          ln -sfn "$RELEASE_DIR" /opt/llm-gateway/current
+          rm -f /tmp/compose.yaml /tmp/compose.prod.yaml /tmp/Caddyfile /tmp/litellm.yaml /tmp/model-catalog.yaml
+
+          cd /opt/llm-gateway/compose
+          export COMPOSE_PROJECT_NAME=llm-gateway
+
+          # Stop host web services that could conflict with Caddy container on ports 80/443
+          systemctl stop caddy apache2 nginx 2>/dev/null || true
+          systemctl disable caddy apache2 nginx 2>/dev/null || true
+          systemctl mask caddy 2>/dev/null || true
+          which fuser >/dev/null 2>&1 && fuser -k 80/tcp 443/tcp 2>/dev/null || true
+
+          # Ensure host iptables allows container port forwarding and ingress
+          # (OCI NSG & Security Lists handle external network perimeter security)
+          which ufw >/dev/null 2>&1 && ufw disable 2>/dev/null || true
+          iptables -P FORWARD ACCEPT 2>/dev/null || true
+          iptables -P INPUT ACCEPT 2>/dev/null || true
+          iptables -I FORWARD 1 -j ACCEPT 2>/dev/null || true
+          iptables -I INPUT 1 -p tcp -m multiport --dports 22,80,443 -j ACCEPT 2>/dev/null || true
+          which netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save 2>/dev/null || true
+
+          docker compose -f compose.yaml -f compose.prod.yaml down --remove-orphans || true
+          docker rm -f $(docker ps -aq) 2>/dev/null || true
+
+          docker compose -f compose.yaml -f compose.prod.yaml pull
+          docker compose -f compose.yaml -f compose.prod.yaml up -d postgres redis
+          for p in $(seq 1 30); do
+            PG_STATUS=$(docker compose -f compose.yaml -f compose.prod.yaml ps postgres --format '{{.Health}}' || true)
+            REDIS_STATUS=$(docker compose -f compose.yaml -f compose.prod.yaml ps redis --format '{{.Health}}' || true)
+            if [ "$PG_STATUS" = "healthy" ] && [ "$REDIS_STATUS" = "healthy" ]; then
+              echo "PostgreSQL and Redis are both healthy!"
+              break
+            fi
+            echo "Waiting for postgres ($PG_STATUS) and redis ($REDIS_STATUS)..."
+            sleep 3
+          done
+
+          # Run Prisma migrations
+          echo "Running LiteLLM database migrations..."
+          docker compose -f compose.yaml -f compose.prod.yaml run -T --rm litellm-migrate || true
+
+          # Apply required LiteLLM database views
+          echo "Applying LiteLLM database views..."
+          if [ -f /opt/llm-gateway/compose/postgres/init/02-views.sql ]; then
+            docker compose -f compose.yaml -f compose.prod.yaml exec -T postgres psql -U litellm -d litellm < /opt/llm-gateway/compose/postgres/init/02-views.sql || true
+          fi
+
+          # Start LiteLLM proxy, Redis, Postgres, Caddy, Node-Exporter
+          docker compose -f compose.yaml -f compose.prod.yaml up -d --remove-orphans caddy litellm node-exporter
+          echo "Services launched. Waiting 30s for Caddy & LiteLLM to settle..."
+          sleep 30
+          docker compose -f compose.yaml -f compose.prod.yaml ps -a
+          docker compose -f compose.yaml -f compose.prod.yaml logs litellm --tail 50 || true
+          docker compose -f compose.yaml -f compose.prod.yaml logs caddy --tail 50 || true
+          docker compose -f compose.yaml -f compose.prod.yaml logs redis --tail 50 || true
+
+          # Local check on VM
+          echo "Testing local connectivity on VM..."
+          curl -v http://localhost:4000/health/liveness 2>&1 || true
+          curl -v http://localhost:80 2>&1 || true
+          EOF
+
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no /tmp/deploy_remote.sh ubuntu@"$GATEWAY_PUBLIC_IP":/tmp/
+          rm -f /tmp/deploy_remote.sh
+
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "sudo bash /tmp/deploy_remote.sh '${{ github.event.inputs.release_tag }}' && rm -f /tmp/deploy_remote.sh"
+
+      - name: Run Smoke Tests Against Deployed Gateway
+        env:
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          GATEWAY_URL="https://${GATEWAY_DNS_DOMAIN}"
+          echo "Running smoke tests against $GATEWAY_URL"
+
+          for i in {1..24}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL/health" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" == "200" ]; then
+              echo "✓ HTTPS Health check passed on $GATEWAY_URL/health (HTTP $HTTP_CODE)"
+              break
+            fi
+            echo "Attempt $i/24: $GATEWAY_URL/health returned HTTP $HTTP_CODE. Retrying in 10s..."
+            if [ "$i" -eq 24 ]; then
+              echo "✗ Health check failed after 24 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "Verifying blocked management routes..."
+          for endpoint in "/ui" "/key/generate" "/team/list" "/config" "/spend/logs" "/metrics" "/health/readiness"; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL$endpoint" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" == "404" ]; then
+              echo "✓ Management route $endpoint blocked (404)"
+            else
+              echo "✗ Management route $endpoint returned HTTP $HTTP_CODE (expected 404)"
+              exit 1
+            fi
+          done
+
+          echo "Verifying unauthenticated inference route rejection..."
+          UNAUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$GATEWAY_URL/v1/models" 2>/dev/null || echo "000")
+          if [ "$UNAUTH_CODE" == "401" ]; then
+            echo "✓ Unauthenticated request rejected (401)"
+          else
+            echo "✗ Expected 401 for unauthenticated request, got HTTP $UNAUTH_CODE"
+            exit 1
+          fi
+
+          if [ -n "$LITELLM_MASTER_KEY" ]; then
+            echo "Verifying authenticated model list access..."
+            AUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Authorization: Bearer $LITELLM_MASTER_KEY" "$GATEWAY_URL/v1/models" 2>/dev/null || echo "000")
+            if [ "$AUTH_CODE" == "200" ]; then
+              echo "✓ Authenticated models list request succeeded (200)"
+            else
+              echo "✗ Authenticated request failed with HTTP $AUTH_CODE"
+              exit 1
+            fi
+          fi
+
+          echo "All smoke tests passed!"
