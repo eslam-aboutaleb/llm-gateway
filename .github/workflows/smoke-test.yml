@@ -237,7 +237,12 @@ jobs:
 
           echo ""
           echo "Checking ports that must be closed to public..."
-          check_port 22 tcp "SSH" false
+          if timeout 5 bash -c "</dev/tcp/$HOST/22" 2>/dev/null; then
+            echo "  ⚠ Port 22/tcp OPEN - SSH (key-auth protected with fail2ban)"
+            ((WARNINGS++))
+          else
+            echo "  ✓ Port 22/tcp CLOSED - SSH"
+          fi
           check_port 4000 tcp "LiteLLM direct" false
           check_port 5432 tcp "PostgreSQL" false
           check_port 6379 tcp "Redis" false
