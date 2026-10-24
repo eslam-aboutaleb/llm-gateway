@@ -117,16 +117,16 @@ jobs:
       - name: Verify backup freshness
         run: |
           # Check latest backup age
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))]" --output json)
 
           if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
             echo "No backups found yet in bucket $OCI_BACKUP_BUCKET"
             exit 1
           fi
 
-          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(.timeCreated)')
+          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(."time-created" // .timeCreated)')
           LATEST_NAME=$(echo "$LATEST" | jq -r '.name')
-          LATEST_TIME=$(echo "$LATEST" | jq -r '.timeCreated')
+          LATEST_TIME=$(echo "$LATEST" | jq -r '."time-created" // .timeCreated')
 
           CREATED_EPOCH=$(date -d "$LATEST_TIME" +%s)
           NOW_EPOCH=$(date +%s)
@@ -172,16 +172,16 @@ jobs:
       - name: Verify backup freshness and checksum
         run: |
           # List backup objects
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated, size:size}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))]" --output json)
 
           if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
             echo "No backup objects found"
             exit 1
           fi
 
-          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(.timeCreated)')
+          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(."time-created" // .timeCreated)')
           LATEST_NAME=$(echo "$LATEST" | jq -r '.name')
-          LATEST_TIME=$(echo "$LATEST" | jq -r '.timeCreated')
+          LATEST_TIME=$(echo "$LATEST" | jq -r '."time-created" // .timeCreated')
           LATEST_SIZE=$(echo "$LATEST" | jq -r '.size')
 
           echo "Latest backup: $LATEST_NAME"

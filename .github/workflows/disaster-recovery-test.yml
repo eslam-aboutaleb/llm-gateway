@@ -66,16 +66,16 @@ jobs:
       - name: Check Latest Backup
         id: backup
         run: |
-          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))].{name:name, timeCreated:timeCreated}" --output json)
+          OBJECTS=$(oci os object list --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --query "data[?contains(name, 'litellm-') && (contains(name, '.dump.age') || contains(name, '.dump'))]" --output json)
 
           if [ "$OBJECTS" == "[]" ] || [ -z "$OBJECTS" ] || [ "$OBJECTS" == "null" ]; then
             echo "No backups found"
             exit 1
           fi
 
-          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(.timeCreated)')
+          LATEST=$(echo "$OBJECTS" | jq -r 'max_by(."time-created" // .timeCreated)')
           LATEST_NAME=$(echo "$LATEST" | jq -r '.name')
-          LATEST_TIME=$(echo "$LATEST" | jq -r '.timeCreated')
+          LATEST_TIME=$(echo "$LATEST" | jq -r '."time-created" // .timeCreated')
 
           echo "Latest backup: $LATEST_NAME"
           echo "Created: $LATEST_TIME"
