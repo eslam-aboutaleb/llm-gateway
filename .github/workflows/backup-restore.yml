@@ -90,7 +90,18 @@ jobs:
             printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
             chmod 600 ~/.ssh/id_ed25519
             ssh-keyscan -H "$GATEWAY_PUBLIC_IP" >> ~/.ssh/known_hosts 2>/dev/null
-            ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "sudo /usr/local/bin/gateway-backup" || echo "Manual SSH backup trigger completed or timed out"
+            ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "sudo bash -c '
+              source /etc/llm-gateway/gateway.env 2>/dev/null || true
+              NS=\"\${OCI_OBJECT_STORAGE_NAMESPACE:-\${BACKUP_BUCKET_NAMESPACE:-$OCI_OBJECT_STORAGE_NAMESPACE}}\"
+              BUCKET=\"\${OCI_BACKUP_BUCKET:-\${BACKUP_BUCKET_NAME:-$OCI_BACKUP_BUCKET}}\"
+              mkdir -p /opt/llm-gateway/backups
+              TS=\$(date -u +\"%Y%m%d-%H%M%S\")
+              DUMP=\"/opt/llm-gateway/backups/litellm-\$TS.dump\"
+              docker exec llm-gateway-postgres sh -c \"PGPASSWORD=\\\$(cat /run/secrets/postgres_password 2>/dev/null || echo \\\"\\\$POSTGRES_PASSWORD\\\") pg_dump -U litellm -d litellm --format=custom --no-owner --no-privileges --compress=6 -f /tmp/backup.dump\"
+              docker cp llm-gateway-postgres:/tmp/backup.dump \"\$DUMP\"
+              docker exec llm-gateway-postgres rm -f /tmp/backup.dump
+              oci os object put --namespace \"\$NS\" --bucket-name \"\$BUCKET\" --file \"\$DUMP\" --name \"\$(basename \"\$DUMP\")\" --auth instance_principal
+            '" || echo "Manual SSH backup trigger completed or timed out"
           fi
 
       - name: Verify backup freshness

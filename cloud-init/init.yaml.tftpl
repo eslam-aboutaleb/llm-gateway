@@ -231,15 +231,20 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      if [[ -f "/etc/llm-gateway/gateway.env" ]]; then
+        source /etc/llm-gateway/gateway.env
+      fi
       if [[ -f "/opt/llm-gateway/config/backup.env" ]]; then
         source /opt/llm-gateway/config/backup.env
       fi
+      OCI_OBJECT_STORAGE_NAMESPACE="$${OCI_OBJECT_STORAGE_NAMESPACE:-$${BACKUP_BUCKET_NAMESPACE:-}}"
+      OCI_BACKUP_BUCKET="$${OCI_BACKUP_BUCKET:-$${BACKUP_BUCKET_NAME:-}}"
       BACKUP_DIR="/opt/llm-gateway/backups"
       mkdir -p "$BACKUP_DIR"
       TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
       BACKUP_FILE="$BACKUP_DIR/litellm-$TIMESTAMP.dump"
       ENCRYPTED_FILE="$BACKUP_FILE.age"
-      docker exec llm-gateway-postgres pg_dump -U litellm -d litellm --format=custom --no-owner --no-privileges --compress=6 -f "/tmp/backup.dump"
+      docker exec llm-gateway-postgres sh -c 'PGPASSWORD="$$(cat /run/secrets/postgres_password 2>/dev/null || echo "$$POSTGRES_PASSWORD")" pg_dump -U litellm -d litellm --format=custom --no-owner --no-privileges --compress=6 -f /tmp/backup.dump'
       docker cp llm-gateway-postgres:/tmp/backup.dump "$BACKUP_FILE"
       docker exec llm-gateway-postgres rm -f /tmp/backup.dump
       if [[ -n "$${BACKUP_AGE_PUBLIC_KEY:-}" ]]; then
@@ -250,7 +255,7 @@ write_files:
         TARGET_FILE="$BACKUP_FILE"
       fi
       if command -v oci &> /dev/null && [[ -n "$${OCI_BACKUP_BUCKET:-}" && -n "$${OCI_OBJECT_STORAGE_NAMESPACE:-}" ]]; then
-        oci os object put --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --file "$TARGET_FILE" --name "$(basename "$TARGET_FILE")" --auth instance_principal
+        oci os object put --namespace "$OCI_OBJECT_STORAGE_NAMESPACE" --bucket-name "$OCI_BACKUP_BUCKET" --file "$TARGET_FILE" --name "$$(basename "$$TARGET_FILE")" --auth instance_principal
       fi
 
   - path: /etc/systemd/system/llm-gateway-backup.service
