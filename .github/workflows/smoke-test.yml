@@ -219,14 +219,14 @@ jobs:
                 echo "  ✓ Port $port/$protocol OPEN - $description"
               else
                 echo "  ✗ Port $port/$protocol OPEN (should be closed) - $description"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
               fi
             else
               if [[ "$should_be_open" == "false" ]]; then
                 echo "  ✓ Port $port/$protocol CLOSED - $description"
               else
                 echo "  ✗ Port $port/$protocol CLOSED (should be open) - $description"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
               fi
             fi
           }
@@ -239,7 +239,7 @@ jobs:
           echo "Checking ports that must be closed to public..."
           if timeout 5 bash -c "</dev/tcp/$HOST/22" 2>/dev/null; then
             echo "  ⚠ Port 22/tcp OPEN - SSH (key-auth protected with fail2ban)"
-            ((WARNINGS++))
+            WARNINGS=$((WARNINGS + 1))
           else
             echo "  ✓ Port 22/tcp CLOSED - SSH"
           fi
@@ -268,17 +268,17 @@ jobs:
                 echo "  ✓ Certificate valid for $DAYS_LEFT days"
               elif [ "$DAYS_LEFT" -gt 7 ]; then
                 echo "  ⚠ Certificate expires in $DAYS_LEFT days"
-                ((WARNINGS++))
+                WARNINGS=$((WARNINGS + 1))
               else
                 echo "  ✗ Certificate expires in $DAYS_LEFT days"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
               fi
 
               if echo "$CERT_INFO" | grep -q "DNS:$HOST"; then
                 echo "  ✓ Certificate includes $HOST"
               else
                 echo "  ✗ Certificate missing $HOST in SAN"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
               fi
 
               TLS_VERSION=$(timeout 10 openssl s_client -connect "$HOST:443" -servername "$HOST" < /dev/null 2>&1 | grep "Protocol" | head -1 | awk '{print $3}')
@@ -286,15 +286,15 @@ jobs:
                 echo "  ✓ TLS version: $TLS_VERSION"
               else
                 echo "  ⚠ TLS version: $TLS_VERSION"
-                ((WARNINGS++))
+                WARNINGS=$((WARNINGS + 1))
               fi
             else
               echo "  ✗ Failed to retrieve TLS certificate"
-              ((FAILED++))
+              FAILED=$((FAILED + 1))
             fi
           else
             echo "  ⚠ openssl not available, skipping TLS check"
-            ((WARNINGS++))
+            WARNINGS=$((WARNINGS + 1))
           fi
 
           # Check HTTP -> HTTPS redirect
@@ -307,11 +307,11 @@ jobs:
               echo "  ✓ HTTP redirects to HTTPS ($RESPONSE)"
             else
               echo "  ⚠ HTTP redirects but not to HTTPS ($RESPONSE -> $LOCATION)"
-              ((WARNINGS++))
+              WARNINGS=$((WARNINGS + 1))
             fi
           else
             echo "  ✗ HTTP does not redirect to HTTPS ($RESPONSE)"
-            ((FAILED++))
+            FAILED=$((FAILED + 1))
           fi
 
           # Check security headers
@@ -328,13 +328,13 @@ jobs:
               VALUE=$(echo "$HEADERS" | grep -i "^$header:" | cut -d: -f2- | xargs)
               if [[ -n "$expected" && "$VALUE" != "$expected" ]]; then
                 echo "  ⚠ $header: $VALUE (expected $expected) - $description"
-                ((WARNINGS++))
+                WARNINGS=$((WARNINGS + 1))
               else
                 echo "  ✓ $header: $VALUE - $description"
               fi
             else
               echo "  ✗ $header missing - $description"
-              ((FAILED++))
+              FAILED=$((FAILED + 1))
             fi
           }
 
@@ -347,7 +347,7 @@ jobs:
           if echo "$HEADERS" | grep -qi "^Server:"; then
             SERVER=$(echo "$HEADERS" | grep -i "^Server:" | cut -d: -f2- | xargs)
             echo "  ⚠ Server header exposed: $SERVER"
-            ((WARNINGS++))
+            WARNINGS=$((WARNINGS + 1))
           else
             echo "  ✓ Server header hidden"
           fi
@@ -361,13 +361,13 @@ jobs:
               echo "  ✓ $endpoint requires authentication (HTTP $RESPONSE)"
             elif [[ "$RESPONSE" == "200" ]]; then
               echo "  ⚠ $endpoint accessible without auth (HTTP $RESPONSE)"
-              ((WARNINGS++))
+              WARNINGS=$((WARNINGS + 1))
             elif [[ "$RESPONSE" == "404" ]]; then
               echo "  ✗ $endpoint returns 404 (should be 401/403)"
-              ((FAILED++))
+              FAILED=$((FAILED + 1))
             else
               echo "  ⚠ $endpoint unexpected response (HTTP $RESPONSE)"
-              ((WARNINGS++))
+              WARNINGS=$((WARNINGS + 1))
             fi
           done
 
@@ -380,7 +380,7 @@ jobs:
               echo "  ✓ $endpoint blocked (404)"
             else
               echo "  ✗ $endpoint accessible (HTTP $RESPONSE)"
-              ((FAILED++))
+              FAILED=$((FAILED + 1))
             fi
           done
 
