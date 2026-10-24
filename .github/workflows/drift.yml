@@ -72,9 +72,11 @@ jobs:
           if [ -z "$NS" ]; then
             NS=$(oci os ns get --query 'data' --raw-output)
           fi
-          echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS" >> "$GITHUB_ENV"
-          echo "TF_VAR_oci_object_storage_namespace=$NS" >> "$GITHUB_ENV"
-          echo "TFSTATE_BUCKET=tfstate-${NS}" >> "$GITHUB_ENV"
+          {
+            echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS"
+            echo "TF_VAR_oci_object_storage_namespace=$NS"
+            echo "TFSTATE_BUCKET=tfstate-${NS}"
+          } >> "$GITHUB_ENV"
 
       - name: Terramate Generate
         run: terramate generate

@@ -29,10 +29,10 @@ resource "oci_monitoring_alarm" "cpu_high" {
   is_enabled     = true
   severity       = "CRITICAL"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeagent"
-  query                        = "CpuUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.cpu_utilization_threshold}"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeagent"
+  query                            = "CpuUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.cpu_utilization_threshold}"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]
@@ -49,10 +49,10 @@ resource "oci_monitoring_alarm" "memory_high" {
   is_enabled     = true
   severity       = "CRITICAL"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeagent"
-  query                        = "MemoryUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.memory_utilization_threshold}"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeagent"
+  query                            = "MemoryUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.memory_utilization_threshold}"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]
@@ -69,10 +69,10 @@ resource "oci_monitoring_alarm" "disk_warning" {
   is_enabled     = true
   severity       = "WARNING"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeagent"
-  query                        = "DiskUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.disk_utilization_warning}"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeagent"
+  query                            = "DiskUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.disk_utilization_warning}"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]
@@ -89,10 +89,10 @@ resource "oci_monitoring_alarm" "disk_critical" {
   is_enabled     = true
   severity       = "CRITICAL"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeagent"
-  query                        = "DiskUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.disk_utilization_critical}"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeagent"
+  query                            = "DiskUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > ${var.disk_utilization_critical}"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]
@@ -109,10 +109,10 @@ resource "oci_monitoring_alarm" "instance_status" {
   is_enabled     = true
   severity       = "CRITICAL"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeinstance"
-  query                        = "InstanceStatus[1m]{resourceId=\"${var.instance_id}\"}.mean() == 0"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeinstance"
+  query                            = "InstanceStatus[1m]{resourceId=\"${var.instance_id}\"}.mean() == 0"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]
@@ -129,10 +129,10 @@ resource "oci_monitoring_alarm" "network_dropped" {
   is_enabled     = true
   severity       = "WARNING"
 
-  metric_compartment_id        = var.compartment_id
-  namespace                    = "oci_computeagent"
-  query                        = "NetworkPacketsDropped[1m]{resourceId=\"${var.instance_id}\"}.sum() > 1000"
-  pending_duration             = "PT5M"
+  metric_compartment_id            = var.compartment_id
+  namespace                        = "oci_computeagent"
+  query                            = "NetworkPacketsDropped[1m]{resourceId=\"${var.instance_id}\"}.sum() > 1000"
+  pending_duration                 = "PT5M"
   metric_compartment_id_in_subtree = false
 
   destinations = [oci_ons_notification_topic.alarms.id]

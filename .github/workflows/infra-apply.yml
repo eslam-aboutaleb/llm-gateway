@@ -95,9 +95,11 @@ jobs:
           if [ -z "$NS" ]; then
             NS=$(oci os ns get --query 'data' --raw-output)
           fi
-          echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS" >> "$GITHUB_ENV"
-          echo "TF_VAR_oci_object_storage_namespace=$NS" >> "$GITHUB_ENV"
-          echo "TFSTATE_BUCKET=tfstate-${NS}" >> "$GITHUB_ENV"
+          {
+            echo "OCI_OBJECT_STORAGE_NAMESPACE=$NS"
+            echo "TF_VAR_oci_object_storage_namespace=$NS"
+            echo "TFSTATE_BUCKET=tfstate-${NS}"
+          } >> "$GITHUB_ENV"
 
       - name: Download Plan Artifact
         env:
@@ -141,11 +143,13 @@ jobs:
           BACKUP_BUCKET=$(terraform output -raw backup_bucket_name)
           DNS_DOMAIN="${INSTANCE_IP}.sslip.io"
 
-          echo "instance_ip=$INSTANCE_IP" >> "$GITHUB_OUTPUT"
-          echo "instance_ocid=$INSTANCE_OCID" >> "$GITHUB_OUTPUT"
-          echo "releases_bucket=$RELEASES_BUCKET" >> "$GITHUB_OUTPUT"
-          echo "backup_bucket=$BACKUP_BUCKET" >> "$GITHUB_OUTPUT"
-          echo "dns_domain=$DNS_DOMAIN" >> "$GITHUB_OUTPUT"
+          {
+            echo "instance_ip=$INSTANCE_IP"
+            echo "instance_ocid=$INSTANCE_OCID"
+            echo "releases_bucket=$RELEASES_BUCKET"
+            echo "backup_bucket=$BACKUP_BUCKET"
+            echo "dns_domain=$DNS_DOMAIN"
+          } >> "$GITHUB_OUTPUT"
           echo "Provisioned Gateway Public IP: $INSTANCE_IP ($DNS_DOMAIN)"
           echo "Provisioned Gateway Instance OCID: $INSTANCE_OCID"
         env:
