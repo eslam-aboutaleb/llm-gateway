@@ -229,20 +229,17 @@ jobs:
             revoke-key)
               KEY_IDENTIFIER="${{ github.event.inputs.key_identifier }}"
               echo "Revoking key identifier: $KEY_IDENTIFIER..."
-              REMOTE_CMD='
-                TARGET="'"$KEY_IDENTIFIER"'"
-                if [[ "$TARGET" == sk-* ]]; then
-                  curl -s -X POST http://127.0.0.1:4000/key/delete \
-                    -H "Authorization: Bearer '"$LITELLM_MASTER_KEY"'" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"keys\": [\"$TARGET\"]}"
-                else
-                  docker exec llm-gateway-postgres psql -U litellm -d litellm -c "DELETE FROM \"LiteLLM_VerificationToken\" WHERE key_alias='\''"$TARGET"'\'';"
-                  docker exec llm-gateway-redis sh -c "redis-cli -a \"\$REDIS_PASSWORD\" FLUSHALL" 2>/dev/null || true
-                  echo "{\"status\": \"success\", \"deleted_alias\": \"$TARGET\"}"
-                fi
-              '
-              RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" "$REMOTE_CMD")
+              if [[ "$KEY_IDENTIFIER" == sk-* ]]; then
+                REVOKE_PAYLOAD=$(jq -n --arg k "$KEY_IDENTIFIER" '{"keys": [$k]}')
+                RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                  "curl -s -X POST http://127.0.0.1:4000/key/delete \
+                   -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" \
+                   -H \"Content-Type: application/json\" \
+                   -d '$REVOKE_PAYLOAD'")
+              else
+                RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                  "docker exec llm-gateway-postgres psql -U litellm -d litellm -c \"DELETE FROM \\\"LiteLLM_VerificationToken\\\" WHERE key_alias = '$KEY_IDENTIFIER';\" && docker exec llm-gateway-redis sh -c 'redis-cli -a \"\$REDIS_PASSWORD\" FLUSHALL' 2>/dev/null || true; echo '{\"status\": \"success\", \"deleted_alias\": \"$KEY_IDENTIFIER\"}'")
+              fi
               echo "$RESPONSE" | jq .
               if echo "$RESPONSE" | jq -e '.error // .detail' >/dev/null 2>&1; then
                 echo "✗ Failed to revoke key."
