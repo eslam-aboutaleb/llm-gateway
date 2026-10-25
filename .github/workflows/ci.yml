@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   quality:
-    uses: eslam-aboutaleb/ci-workflows/.github/workflows/ci.yml@57c21925ec0fd1aa1969922136fa7b2594ce6a4e
+    uses: eslam-aboutaleb/ci-workflows/.github/workflows/ci.yml@68615e1c52d02f621ea67dec67386179eeeac35e
     permissions:
       contents: read
       actions: read
