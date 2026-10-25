@@ -229,18 +229,22 @@ jobs:
             revoke-key)
               KEY_IDENTIFIER="${{ github.event.inputs.key_identifier }}"
               echo "Revoking key identifier: $KEY_IDENTIFIER..."
-              if [[ "$KEY_IDENTIFIER" == sk-* ]]; then
-                PAYLOAD=$(jq -n --arg k "$KEY_IDENTIFIER" '{keys: [$k]}')
-              else
-                PAYLOAD=$(jq -n --arg a "$KEY_IDENTIFIER" '{key_aliases: [$a]}')
-              fi
-              RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
-                "curl -s -X POST http://127.0.0.1:4000/key/delete \
-                 -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" \
-                 -H \"Content-Type: application/json\" \
-                 -d '$PAYLOAD'")
+              RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" bash -s <<EOF
+                TARGET="$KEY_IDENTIFIER"
+                if [[ "\$TARGET" != sk-* ]]; then
+                  RESOLVED=\$(docker exec llm-gateway-postgres psql -U litellm -d litellm -t -Ac "SELECT token FROM \"LiteLLM_VerificationToken\" WHERE key_alias='\$TARGET' LIMIT 1;" 2>/dev/null || true)
+                  if [ -n "\$RESOLVED" ]; then
+                    TARGET="\$RESOLVED"
+                  fi
+                fi
+                curl -s -X POST http://127.0.0.1:4000/key/delete \
+                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"keys\": [\"\$TARGET\"]}"
+EOF
+)
               echo "$RESPONSE" | jq .
-              if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+              if echo "$RESPONSE" | jq -e '.error // .detail' >/dev/null 2>&1; then
                 echo "✗ Failed to revoke key."
                 exit 1
               fi
