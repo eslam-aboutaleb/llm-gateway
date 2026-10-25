@@ -228,17 +228,14 @@ jobs:
 
             revoke-key)
               KEY_IDENTIFIER="${{ github.event.inputs.key_identifier }}"
-              KEYS_JSON=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
-                "curl -s -X GET http://127.0.0.1:4000/key/list -H \"Authorization: Bearer $LITELLM_MASTER_KEY\"")
-              KEY_ID=$(echo "$KEYS_JSON" | jq -r --arg id "$KEY_IDENTIFIER" '.keys[] | select(.key_alias == $id or .key_id == $id) | .key_id' | head -n1)
-              if [ -z "$KEY_ID" ]; then
-                echo "✗ Key not found matching identifier: $KEY_IDENTIFIER"
-                exit 1
-              fi
-              echo "Revoking key $KEY_ID ($KEY_IDENTIFIER)..."
-              ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
-                "curl -s -X POST http://127.0.0.1:4000/key/revoke -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" -H \"Content-Type: application/json\" -d '{\"key_id\": \"$KEY_ID\"}'" | jq .
-              echo "✓ Key revoked successfully."
+              echo "Revoking key with identifier/alias: $KEY_IDENTIFIER..."
+              RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
+                "curl -s -X POST http://127.0.0.1:4000/key/delete \
+                 -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" \
+                 -H \"Content-Type: application/json\" \
+                 -d '{\"keys\": [\"$KEY_IDENTIFIER\"], \"key_aliases\": [\"$KEY_IDENTIFIER\"]}'")
+              echo "$RESPONSE" | jq .
+              echo "✓ Revoke command completed."
               ;;
 
             create-team)
