@@ -1,8 +1,6 @@
-# Pull Request Template
-
 ## Description
 
-Brief description of the changes and the problem they solve.
+<!-- Provide a brief description of the changes introduced by this PR. -->
 
 ## Type of Change
 
@@ -10,11 +8,39 @@ Brief description of the changes and the problem they solve.
 - [ ] New feature (non-breaking change which adds functionality)
 - [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
 - [ ] Documentation update
-- [ ] Infrastructure change (Terraform/Terramate)
-- [ ] CI/CD workflow change
-- [ ] Security improvement
+- [ ] Performance improvement
+- [ ] CI/CD or tooling enhancement
 
-## Testing
+## Behavior and Compatibility
+
+<!-- For runtime changes, describe the observable contract and the path through
+callers, adapters, storage, and readers. Include a concrete before/after example
+where useful, plus any API or adapter migration requirements.
+For documentation or cosmetic changes, mark runtime sections N/A. -->
+
+## Verification Evidence
+
+<!-- Map changed contracts to behavioral tests. Name the real internal components
+exercised and relevant failure, retry, denied-scope, or boundary scenarios.
+For bug fixes, state whether the regression failed before the fix.
+List commands and results, plus skipped checks and unverified assumptions. -->
+
+## Independent Review
+
+<!-- For authorization, concurrency, or recovery changes, identify the independent
+reviewer and outcome before merging. Otherwise mark N/A. -->
+
+## Checklist
+
+- [ ] My code adheres to the project's coding style guidelines (`ruff check .` and `ruff format --check .`)
+- [ ] Changed runtime contracts and compatibility requirements are documented above (or N/A explained)
+- [ ] Behavioral tests exercise the changed component boundaries and relevant failure scenarios (or N/A explained)
+- [ ] Verification commands, results, and skipped checks are recorded above
+- [ ] I have updated documentation where appropriate
+
+## Repository-specific checks
+
+### Testing
 
 - [ ] Unit tests pass
 - [ ] Integration tests pass
@@ -23,13 +49,13 @@ Brief description of the changes and the problem they solve.
 - [ ] Security scans pass (gitleaks, IaC policy)
 - [ ] Manual verification steps completed (describe below)
 
-### Manual Verification Steps
+#### Manual Verification Steps
 
 1.
 2.
 3.
 
-## Checklist
+### Checklist
 
 - [ ] No secrets, credentials, or sensitive data in commits, diffs, or CI logs
 - [ ] Code follows project style guidelines (run linters)
@@ -40,15 +66,15 @@ Brief description of the changes and the problem they solve.
 - [ ] Dependencies pinned by digest/SHA where applicable
 - [ ] Branch protection rules respected (no force push to protected branches)
 
-## Related Issues
+### Related Issues
 
 Closes #<issue-number>
 
-## Screenshots / Logs (if applicable)
+### Screenshots / Logs (if applicable)
 
 <!-- Add screenshots or relevant log output here -->
 
-## Deployment Notes
+### Deployment Notes
 
 <!-- Any special deployment considerations, migration steps, or rollback procedures -->
 
