@@ -228,14 +228,23 @@ jobs:
 
             revoke-key)
               KEY_IDENTIFIER="${{ github.event.inputs.key_identifier }}"
-              echo "Revoking key with identifier/alias: $KEY_IDENTIFIER..."
+              echo "Revoking key identifier: $KEY_IDENTIFIER..."
+              if [[ "$KEY_IDENTIFIER" == sk-* ]]; then
+                PAYLOAD=$(jq -n --arg k "$KEY_IDENTIFIER" '{keys: [$k]}')
+              else
+                PAYLOAD=$(jq -n --arg a "$KEY_IDENTIFIER" '{key_aliases: [$a]}')
+              fi
               RESPONSE=$(ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@"$GATEWAY_PUBLIC_IP" \
                 "curl -s -X POST http://127.0.0.1:4000/key/delete \
                  -H \"Authorization: Bearer $LITELLM_MASTER_KEY\" \
                  -H \"Content-Type: application/json\" \
-                 -d '{\"keys\": [\"$KEY_IDENTIFIER\"], \"key_aliases\": [\"$KEY_IDENTIFIER\"]}'")
+                 -d '$PAYLOAD'")
               echo "$RESPONSE" | jq .
-              echo "✓ Revoke command completed."
+              if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+                echo "✗ Failed to revoke key."
+                exit 1
+              fi
+              echo "✓ Key revoked successfully."
               ;;
 
             create-team)
