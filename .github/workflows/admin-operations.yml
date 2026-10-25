@@ -72,7 +72,7 @@ on:
         required: false
         type: string
         default: '50'
-      budget_duration:
+      key_budget_duration:
         description: 'Budget reset window (for issue-key)'
         required: false
         type: string
@@ -174,7 +174,7 @@ jobs:
                 --arg uid "${{ github.event.inputs.user_id }}" \
                 --arg tid "${{ github.event.inputs.team_id }}" \
                 --arg dur "${{ github.event.inputs.duration || '90d' }}" \
-                --arg bdur "${{ github.event.inputs.budget_duration || '90d' }}" \
+                --arg bdur "${{ github.event.inputs.key_budget_duration || github.event.inputs.budget_duration || '90d' }}" \
                 --argjson models "$MODELS_JSON" \
                 --argjson budget "${{ github.event.inputs.key_budget || 50 }}" \
                 --argjson rpm "${{ github.event.inputs.key_rpm || 60 }}" \
