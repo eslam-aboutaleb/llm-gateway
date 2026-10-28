@@ -17,6 +17,7 @@ on:
           - revoke-key
           - list-keys
           - list-teams
+          - set-model-alias
       # create-team inputs
       team_alias:
         description: 'Team alias (for create-team)'
@@ -104,7 +105,16 @@ on:
         default: '{}'
       # revoke-key inputs
       key_identifier:
-        description: 'Key alias or ID to revoke (for revoke-key)'
+        description: 'Key alias or ID (revoke-key), or key alias (set-model-alias)'
+        required: false
+        type: string
+      # set-model-alias inputs
+      model_name:
+        description: 'Additional model name accepted by the key (for set-model-alias)'
+        required: false
+        type: string
+      model_target:
+        description: 'Existing allowed gateway deployment (for set-model-alias)'
         required: false
         type: string
 
@@ -155,7 +165,36 @@ jobs:
               ;;
           esac
 
+      - name: Set key model alias through private administration API
+        if: github.event.inputs.operation == 'set-model-alias'
+        env:
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          GATEWAY_PUBLIC_IP: ${{ vars.GATEWAY_PUBLIC_IP || '82.70.210.36' }}
+          KEY_IDENTIFIER: ${{ inputs.key_identifier }}
+          USER_ID: ${{ inputs.user_id }}
+          MODEL_NAME: ${{ inputs.model_name }}
+          MODEL_TARGET: ${{ inputs.model_target }}
+        run: |
+          set -euo pipefail
+          for value in "$KEY_IDENTIFIER" "$USER_ID" "$MODEL_NAME" "$MODEL_TARGET"; do
+            if [[ ! "$value" =~ ^[A-Za-z0-9_.:/-]{1,128}$ ]]; then
+              echo "::error::Key alias, user ID, model name and target must be valid identifiers"
+              exit 1
+            fi
+          done
+          mkdir -p ~/.ssh
+          SSH_KEY_FILE=$(mktemp)
+          trap 'rm -f "$SSH_KEY_FILE"' EXIT
+          printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > "$SSH_KEY_FILE"
+          chmod 600 "$SSH_KEY_FILE"
+          ssh-keyscan -H "$GATEWAY_PUBLIC_IP" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            ubuntu@"$GATEWAY_PUBLIC_IP" \
+            "sudo python3 - '$KEY_IDENTIFIER' '$USER_ID' '$MODEL_NAME' '$MODEL_TARGET'" \
+            < scripts/set-key-model-alias.py
+
       - name: Execute Admin Operation via SSH
+        if: github.event.inputs.operation != 'set-model-alias'
         env:
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
           GATEWAY_PUBLIC_IP: ${{ vars.GATEWAY_PUBLIC_IP || '82.70.210.36' }}

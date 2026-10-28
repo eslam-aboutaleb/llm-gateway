@@ -105,6 +105,8 @@ ci-quality:
 			fi; \
 		done; \
 	fi
+	@echo "==> Testing private key alias operations"
+	@python3 -m unittest discover -s tests -v
 	@echo "All quality checks passed!"
 
 ci-docs:
