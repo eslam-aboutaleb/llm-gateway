@@ -49,6 +49,27 @@ This is a payload example, **not** a ready-made permission grant. Use a valid te
 4. Share the secret **one time** through approved private secret-sharing tool, preferably expiring after retrieval. Do not post key values or screenshots to GitHub; issue can say `Approved; securely delivered`.
 5. Record delivery acknowledgment, owner, expiry, rotation reminders and a nonsecret audit identifier.
 
+## Accepting an additional model name on an existing key
+
+The pinned proxy supports per-key model aliases. The `set-model-alias` operation
+in **Admin Operations** maps an additional client model name to a deployment
+already allowed for that key. For the Polymarket key, use:
+
+- `operation`: `set-model-alias`
+- `key_identifier`: `polymarket-key`
+- `user_id`: `POLYMARKET`
+- `model_name`: `gpt-4o-mini`
+- `model_target`: `general-fast`
+
+`general-fast` currently deploys `openai/gpt-4o-mini` in
+[`litellm.yaml`](../gateway/config/litellm.yaml). This permits clients to request
+`gpt-4o-mini` without changing the shared capability alias or other keys.
+The script verifies a unique key/owner match, merges existing aliases, rejects
+a conflicting mapping or an unauthorized target, and verifies that model
+permissions, budget, expiry and rate limits remain unchanged. It uses the private
+loopback management API over SSH and never prints credentials or API responses.
+A gateway restart is not required; `/key/update` invalidates that key's cache.
+
 ## Renewal and rotation
 
 - Requester asks for extension/scope change without sharing the key value. Re-approve new budget/models and expiry.
