@@ -102,6 +102,19 @@ on:
         required: false
         type: string
         default: '{}'
+      # sealed key delivery (optional, for issue-key): when set, the minted key is
+      # never printed; it is sealed (libsodium box) to the target repo's Actions
+      # public key and only the sealed blob is logged.
+      target_repo_public_key:
+        description: 'Base64 Actions public key of the target repo (optional, for issue-key)'
+        required: false
+        type: string
+        default: ''
+      target_repo_key_id:
+        description: 'Key id matching target_repo_public_key (optional, for issue-key)'
+        required: false
+        type: string
+        default: ''
       # revoke-key inputs
       key_identifier:
         description: 'Key alias or ID to revoke (for revoke-key)'
@@ -201,6 +214,7 @@ jobs:
 
               KEY=$(echo "$RESPONSE" | jq -r '.key // empty')
               if [ -n "$KEY" ]; then
+                echo "::add-mask::$KEY"
                 echo "=========================================================="
                 echo "✓ VIRTUAL KEY ISSUED SUCCESSFULLY"
                 echo "=========================================================="
@@ -210,10 +224,20 @@ jobs:
                 echo "Max Budget: \$${{ github.event.inputs.key_budget || 50 }}"
                 echo "Duration:   ${{ github.event.inputs.duration || '90d' }}"
                 echo "Models:     ${{ github.event.inputs.models }}"
-                echo ""
-                echo "VIRTUAL API KEY: $KEY"
-                echo "=========================================================="
-                echo "⚠️  Deliver this key to the user securely. It will not be shown again."
+                echo "Verifying key against the public inference ingress (codes only)..."
+                VCODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" "https://${{ vars.GATEWAY_DNS_DOMAIN }}/v1/models")
+                echo "GET /v1/models with new key -> HTTP $VCODE (2xx expected)"
+                DCODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"model":"general-fast","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' "https://${{ vars.GATEWAY_DNS_DOMAIN }}/v1/chat/completions")
+                echo "POST /v1/chat/completions with non-allowlisted model -> HTTP $DCODE (non-2xx expected)"
+                if [ -n "${{ github.event.inputs.target_repo_public_key }}" ]; then
+                  python3 -m pip install --quiet --user pynacl || python3 -m pip install --quiet --user --break-system-packages pynacl
+                  SEALED=$(RAW_KEY="$KEY" TARGET_PK="${{ github.event.inputs.target_repo_public_key }}" python3 -c "import base64,os;from nacl.public import PublicKey,SealedBox;print(base64.b64encode(SealedBox(PublicKey(base64.b64decode(os.environ['TARGET_PK']))).encrypt(os.environ['RAW_KEY'].encode())).decode())")
+                  echo "SEALED_SECRET_B64=$SEALED"
+                  echo "Sealed to target repo Actions public key id: ${{ github.event.inputs.target_repo_key_id }}"
+                  echo "Raw key never logged; only the sealed blob above appears here."
+                else
+                  echo "No target_repo_public_key provided; raw key withheld from logs by design."
+                fi
               else
                 echo "✗ Failed to generate key. LiteLLM response:"
                 echo "$RESPONSE"
